@@ -1,10 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { API_URL } from "../../lib/api";
 import { BRAND_NAME } from "../../lib/brand";
 import { BrandLockup } from "../../components/BrandLockup";
+import { loadPublicRegistrationStatus } from "../../lib/publicRegistration";
 
 const SPECIALS = "!@#$%^&*";
 
@@ -45,6 +46,11 @@ export default function RegisterPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [createdAccount, setCreatedAccount] = useState<CreatedAccount | null>(null);
+  const [registrationEnabled, setRegistrationEnabled] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    void loadPublicRegistrationStatus(API_URL).then(setRegistrationEnabled);
+  }, []);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -86,6 +92,24 @@ export default function RegisterPage() {
           </div>
           <p style={{ fontSize: 14 }}>Sign in with <strong>{createdAccount.email}</strong> or your Employee Number. You will secure the account with multi-factor authentication next.</p>
           <Link href="/login" style={{ display: "block", marginTop: 20 }}><button type="button" style={{ width: "100%" }}>Continue to Sign In</button></Link>
+        </section>
+      </main>
+    );
+  }
+
+  if (registrationEnabled !== true) {
+    return (
+      <main className="container">
+        <section style={{ maxWidth: 560, margin: "32px auto", padding: 24, border: "1px solid var(--color-border)", borderRadius: 16, background: "var(--color-surface)" }}>
+          <div style={{ marginBottom: 24 }}><BrandLockup /></div>
+          <h1>{registrationEnabled === null ? "Checking account access…" : "Administrator Approval Required"}</h1>
+          {registrationEnabled === false && (
+            <>
+              <p>Public account creation is disabled to protect store inventory.</p>
+              <p>Ask your ContinuiXAi administrator to create your employee account.</p>
+              <Link href="/login"><button type="button">Return to Sign In</button></Link>
+            </>
+          )}
         </section>
       </main>
     );

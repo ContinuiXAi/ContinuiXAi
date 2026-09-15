@@ -27,7 +27,10 @@ export default function StoreProductsPage() {
 
   useEffect(() => { if (!loading && !user) router.push("/login"); }, [loading, user, router]);
   async function load() {
-    const [productRows, categoryRows] = await Promise.all([apiJson<Product[]>("/api/products?includeInactive=true"), apiJson<Category[]>("/api/categories")]);
+    const [productRows, categoryRows] = await Promise.all([
+      apiJson<Product[]>("/api/products?includeInactive=true"),
+      apiJson<Category[]>("/api/categories").catch(() => []),
+    ]);
     setProducts(productRows); setCategories(categoryRows.filter((category) => category.isActive !== false));
   }
   useEffect(() => { if (user) void load(); }, [user]); // eslint-disable-line react-hooks/exhaustive-deps

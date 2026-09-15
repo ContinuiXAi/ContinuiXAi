@@ -38,7 +38,6 @@ export default function LoginPage() {
   const [stage, setStage] = useState<Stage>("password");
   const [challengeToken, setChallengeToken] = useState("");
   const [mfaCode, setMfaCode] = useState("");
-  const [qrDataUrl, setQrDataUrl] = useState("");
   const [manualSecret, setManualSecret] = useState("");
   const [backupCodes, setBackupCodes] = useState<string[]>([]);
   const [pendingToken, setPendingToken] = useState("");
@@ -57,7 +56,7 @@ export default function LoginPage() {
       const setupRes = await fetch(`${API_URL}/api/auth/mfa/setup`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ challengeToken: data.challengeToken }) });
       const setup = await setupRes.json();
       if (!setupRes.ok) throw new Error(setup.error || "Unable to start MFA setup.");
-      setQrDataUrl(setup.qrDataUrl); setManualSecret(setup.secret); setStage("setup");
+      setManualSecret(setup.secret); setStage("setup");
     } else setStage("verify");
   }
 
@@ -114,7 +113,7 @@ export default function LoginPage() {
   async function finishEnrollment() { await login(pendingToken); router.push("/"); }
 
   if (checkingBootstrap) return <AuthShell><p style={taglineStyle}>Connecting securely...</p></AuthShell>;
-  if (stage === "setup") return <AuthShell><h1 style={brandStyle}>Secure Your Account</h1><p style={helperStyle}>Open your authenticator app and scan this QR code.</p>{qrDataUrl && <img src={qrDataUrl} alt={`${BRAND_NAME} MFA QR code`} style={{ width: 220, maxWidth: "100%", background: "white", padding: 8, borderRadius: 10, display: "block", margin: "16px auto" }} />}<p style={{ ...helperStyle, marginBottom: 6 }}><strong>Can’t scan it?</strong> Enter this setup key manually:</p><code style={{ wordBreak: "break-all", fontSize: 13 }}>{manualSecret}</code><form onSubmit={confirmEnrollment} className="form" style={{ marginTop: 18 }}><input style={fieldStyle} inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]*" maxLength={6} placeholder="6-digit verification code" value={mfaCode} onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, "").slice(0, 6))} required /><button type="submit" disabled={loading || mfaCode.length !== 6}>{loading ? "Verifying..." : "Verify and Enable MFA"}</button>{error && <p className="error-text">{error}</p>}</form></AuthShell>;
+  if (stage === "setup") return <AuthShell><h1 style={brandStyle}>Secure Your Account</h1><p style={helperStyle}>Open Google Authenticator, tap <strong>+</strong>, choose <strong>Enter a setup key</strong>, and enter the key below. Then enter the 6-digit code Google Authenticator shows.</p><p style={{ ...helperStyle, marginBottom: 6 }}><strong>Google Authenticator setup key</strong></p><code style={{ wordBreak: "break-all", fontSize: 13 }}>{manualSecret}</code><form onSubmit={confirmEnrollment} className="form" style={{ marginTop: 18 }}><input style={fieldStyle} inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]*" maxLength={6} placeholder="6-digit verification code" value={mfaCode} onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, "").slice(0, 6))} required /><button type="submit" disabled={loading || mfaCode.length !== 6}>{loading ? "Verifying..." : "Verify and Enable MFA"}</button>{error && <p className="error-text">{error}</p>}</form></AuthShell>;
   if (stage === "verify") return <AuthShell><h1 style={brandStyle}>Multi-Factor Verification</h1><p style={helperStyle}>Enter the 6-digit code from your authenticator app, or use a backup code.</p><form onSubmit={verifyMfa} className="form"><input style={fieldStyle} autoFocus autoComplete="one-time-code" placeholder="6-digit code or backup code" value={mfaCode} onChange={(e) => setMfaCode(e.target.value.toUpperCase())} required /><button type="submit" disabled={loading}>{loading ? "Verifying..." : "Verify & Sign In"}</button>{error && <p className="error-text">{error}</p>}</form><button type="button" className="secondary" onClick={() => { setStage("password"); setMfaCode(""); setPassword(""); }} style={{ marginTop: 12, width: "100%" }}>Back to Sign In</button></AuthShell>;
   if (stage === "backup") return <AuthShell><h1 style={brandStyle}>MFA Is Enabled</h1><p style={helperStyle}><strong>Save these backup codes now.</strong> Each code can be used once if you lose access to your authenticator app.</p><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, margin: "18px 0" }}>{backupCodes.map((code) => <code key={code} style={{ fontSize: 14, padding: 8, background: "var(--color-surface-hover)", borderRadius: 8 }}>{code}</code>)}</div><button type="button" onClick={finishEnrollment} style={{ width: "100%" }}>I Saved My Backup Codes — Continue</button></AuthShell>;
 

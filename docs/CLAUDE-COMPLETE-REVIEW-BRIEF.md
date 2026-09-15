@@ -1,5 +1,11 @@
 # Claude Adversarial Review Brief — Continuixai Ops
 
+## September 2026 authenticator hardening review boundary
+
+Review only the exact draft-PR head SHA supplied with this brief. SMS/Twilio is abandoned and must not be reintroduced. The candidate retains password → authenticator-app TOTP → revocable session, using OTPAuth for standards-based TOTP.
+
+Explicitly attempt to defeat: production registration denial; populated multi-site membership backfill; cross-organization site administration; replayed setup challenges; reuse/concurrent reuse of an accepted TOTP counter or backup code; JWT and media-token reuse after logout, password reset, MFA reset, or deactivation; administrator cross-tenant/self MFA reset; sole-admin break-glass auditing; unknown-user timing equalization; and API/web build-SHA identification. Confirm migrations against fresh and representative populated PostgreSQL databases. A green CI result is necessary but not a security verdict.
+
 ## Mission
 
 Treat this repository as hostile input and try to prove that Continuixai Ops is **not** ready for a controlled pilot. Do not optimize for politeness. Find reproducible failures, security weaknesses, data-integrity risks, race conditions, confusing frontline UX, and gaps between code and stated behavior.

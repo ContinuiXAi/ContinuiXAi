@@ -11,6 +11,7 @@ import { BottomNav } from "../components/BottomNav";
 import { OfflineBanner } from "../components/OfflineBanner";
 import { RetailScannerAssist } from "../components/RetailScannerAssist";
 import { BRAND_NAME, BRAND_TAGLINE } from "../lib/brand";
+import { BuildMarker } from "../components/BuildMarker";
 
 const THEME_INIT_SCRIPT = `(function(){try{var t=localStorage.getItem("continuixai_theme");if(t==="light"||t==="dark"){document.documentElement.setAttribute("data-theme",t);}}catch(e){}})();`;
 
@@ -61,6 +62,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
               <AuthProvider>
                 <OfflineBanner />
                 {children}
+                <BuildMarker />
                 <BottomNav />
               </AuthProvider>
             </ToastProvider>

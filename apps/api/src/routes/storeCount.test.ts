@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { buildSummaryRows, type SummaryEntryInput } from "./storeCount.js";
+import {
+  buildExpectationSnapshotData,
+  buildLocationVisitData,
+  buildSummaryRows,
+  type SummaryEntryInput,
+} from "./storeCount.js";
 
 describe("buildSummaryRows", () => {
   it("merges different barcodes that resolve to the same product", () => {
@@ -72,5 +77,30 @@ describe("buildSummaryRows", () => {
 
   it("returns an empty array for an empty session", () => {
     expect(buildSummaryRows([])).toEqual([]);
+  });
+});
+
+describe("store count inventory truth snapshots", () => {
+  it("preserves signed store totals, including sums produced by locationless events", () => {
+    expect(buildExpectationSnapshotData([
+      { productId: "product-a", _sum: { quantity: 15 } },
+      { productId: "product-b", _sum: { quantity: -2 } },
+    ], "session-a")).toEqual([
+      { sessionId: "session-a", productId: "product-a", expectedStoreQty: 15 },
+      { sessionId: "session-a", productId: "product-b", expectedStoreQty: -2 },
+    ]);
+  });
+
+  it("creates one deterministic visit per active required hinted location", () => {
+    expect(buildLocationVisitData([
+      { locationId: "back", location: { id: "back", sortOrder: 20, code: "BACK" } },
+      { locationId: "shelf", location: { id: "shelf", sortOrder: 10, code: "A1" } },
+      { locationId: "shelf", location: { id: "shelf", sortOrder: 10, code: "A1" } },
+      { locationId: "shelf-z", location: { id: "shelf-z", sortOrder: 10, code: "A1" } },
+    ], "session-a")).toEqual([
+      { sessionId: "session-a", locationId: "shelf" },
+      { sessionId: "session-a", locationId: "shelf-z" },
+      { sessionId: "session-a", locationId: "back" },
+    ]);
   });
 });

@@ -73,5 +73,16 @@ describe("official ContinuiXai brand standard", () => {
     expect(css).toContain("--brand-navy: #16235a;");
     expect(css).toContain("--brand-teal: #18b5c9;");
     expect(css).toContain("--brand-amber: #f5a623;");
+    expect(css).toContain(`@media (prefers-color-scheme: dark) {
+  .brand-lockup__name {
+    color: var(--brand-teal);
+  }
+}`);
+    expect(css).toContain(`[data-theme="dark"] .brand-lockup__name {
+  color: var(--brand-teal);
+}`);
+    expect(css).toContain(`[data-theme="light"] .brand-lockup__name {
+  color: var(--brand-navy);
+}`);
   });
 });

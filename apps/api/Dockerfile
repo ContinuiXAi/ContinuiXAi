@@ -13,6 +13,8 @@ COPY packages/shared/package.json packages/shared/package.json
 RUN npm install
 
 FROM deps AS build
+ARG BUILD_SHA="unknown"
+ENV BUILD_SHA=$BUILD_SHA
 COPY . .
 RUN npm run build -w packages/shared
 # prisma generate does not connect to the DB, but prisma.config.ts requires DATABASE_URL.
@@ -21,6 +23,8 @@ RUN npm run build -w apps/api
 
 FROM base AS runner
 ENV NODE_ENV=production
+ARG BUILD_SHA="unknown"
+ENV BUILD_SHA=$BUILD_SHA
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/packages/shared ./packages/shared
 COPY --from=build /app/apps/api/dist ./apps/api/dist

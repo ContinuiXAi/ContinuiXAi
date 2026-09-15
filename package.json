@@ -2,7 +2,10 @@
   "name": "continuixai-ops",
   "private": true,
   "version": "0.7.4",
-  "workspaces": ["apps/*", "packages/*"],
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
     "dev:api": "npm run dev -w apps/api",
     "dev:web": "npm run dev -w apps/web",
@@ -16,12 +19,22 @@
     "lint": "npm run lint -w apps/api && npm run lint -w apps/web",
     "measure:zxing": "node scripts/measure-zxing-chunks.cjs"
   },
-  "devDependencies": { "playwright-core": "^1.62.1" },
+  "devDependencies": {
+    "playwright-core": "^1.62.1",
+    "prisma": "7.10.0"
+  },
   "overrides": {
     "postcss": "^8.5.25",
-    "sharp": "^0.35.3",
+    "sharp": "0.35.4",
+    "js-yaml": "4.3.2",
     "eslint": "^9.39.5",
     "nanoid": "^3.3.18",
-    "deepmerge-ts": "^8.0.1"
+    "fast-uri": "4.1.4",
+    "prisma": {
+      "mysql2": "3.24.4"
+    },
+    "@prisma/config": {
+      "deepmerge-ts": "8.0.2"
+    }
   }
 }

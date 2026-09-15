@@ -1,4 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { getCachedTokenVersion } from "./tokenVersion.js";
+import { isSessionActive } from "./sessionService.js";
 
 export const MEDIA_COOKIE_NAME = "continuixai_media";
 /**
@@ -29,14 +31,14 @@ export function clearMediaCookieOptions() {
   };
 }
 
-export function signMediaToken(app: FastifyInstance, userId: string): string {
+export function signMediaToken(app: FastifyInstance, userId: string, tokenVersion: number, sessionId: string): string {
   // purpose:"media"만 담는다 — role/tv 없음. authenticate가 purpose === "media"를 거부해야
   // 이 토큰이 Authorization Bearer로 API 전체에 쓰이지 않는다.
-  return app.jwt.sign({ sub: userId, purpose: "media" }, { expiresIn: MEDIA_TOKEN_EXPIRES });
+  return app.jwt.sign({ sub: userId, tv: tokenVersion, sid: sessionId, purpose: "media" }, { expiresIn: MEDIA_TOKEN_EXPIRES });
 }
 
-export function setMediaCookie(app: FastifyInstance, reply: FastifyReply, userId: string): void {
-  reply.setCookie(MEDIA_COOKIE_NAME, signMediaToken(app, userId), mediaCookieOptions());
+export function setMediaCookie(app: FastifyInstance, reply: FastifyReply, userId: string, tokenVersion: number, sessionId: string): void {
+  reply.setCookie(MEDIA_COOKIE_NAME, signMediaToken(app, userId, tokenVersion, sessionId), mediaCookieOptions());
 }
 
 export function clearMediaCookie(reply: FastifyReply): void {
@@ -65,8 +67,11 @@ export async function requireMediaAccess(
   const cookieToken = request.cookies?.[MEDIA_COOKIE_NAME];
   if (typeof cookieToken === "string" && cookieToken.length > 0) {
     try {
-      const decoded = app.jwt.verify<{ sub: string; purpose?: string }>(cookieToken);
-      if (decoded.purpose === "media" && decoded.sub) return true;
+      const decoded = app.jwt.verify<{ sub: string; tv?: number; sid?: string; purpose?: string }>(cookieToken);
+      if (decoded.purpose === "media" && decoded.sub && typeof decoded.tv === "number" && decoded.sid) {
+        const current = await getCachedTokenVersion(decoded.sub);
+        if (current === decoded.tv && await isSessionActive(decoded.sid, decoded.sub, decoded.tv)) return true;
+      }
     } catch {
       // fall through
     }
@@ -76,9 +81,11 @@ export async function requireMediaAccess(
   if (auth?.startsWith("Bearer ")) {
     try {
       await request.jwtVerify();
-      // 미디어 전용 토큰을 Bearer로 보내는 것은 허용(첨부 경로 한정).
-      // API 전용 토큰(purpose 없음)도 허용.
-      return true;
+      const { sub, tv, sid } = request.user;
+      if (sub && typeof tv === "number" && sid) {
+        const current = await getCachedTokenVersion(sub);
+        if (current === tv && await isSessionActive(sid, sub, tv)) return true;
+      }
     } catch {
       // fall through
     }

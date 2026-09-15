@@ -59,6 +59,10 @@ async function main() {
       { organizationId: organization.id, userId: user.id, role: "INVENTORY", isActive: true },
     ] });
     const site = await prisma.site.create({ data: { organizationId: organization.id, code: siteCode, name: "Route validation site", type: "STORE", isActive: true } });
+    await prisma.siteMembership.createMany({ data: [
+      { siteId: site.id, userId: admin.id, isActive: true },
+      { siteId: site.id, userId: user.id, isActive: true },
+    ] });
     const location = await prisma.storeLocation.create({ data: { siteId: site.id, code: locationCode, name: "Route validation location", isActive: true } });
     locationId = location.id;
     await prisma.product.createMany({ data: [

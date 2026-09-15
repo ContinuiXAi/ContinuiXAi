@@ -17,6 +17,7 @@ describe("buildCountScanPresentation", () => {
       added: 1,
       current: 4,
       known: true,
+      announcement: "Added 1 of Mr. Clean Clean Freak to A1-01 — Cleaning Aisle. Ready for the next item.",
     });
   });
 
@@ -46,6 +47,7 @@ describe("buildCountScanPresentation", () => {
       added: 1,
       current: 1,
       known: false,
+      announcement: "Added 1 of UPC 999999999999 to EC-01 — Endcap. Product details need review.",
     });
   });
 });

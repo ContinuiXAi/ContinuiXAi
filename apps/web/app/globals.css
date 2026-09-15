@@ -220,6 +220,59 @@ button.secondary {
   border: 1px solid var(--color-border);
 }
 
+.count-quantity-card {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.count-quantity-card form {
+  display: grid;
+  gap: 12px;
+}
+
+.count-quantity-card__controls {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) 48px;
+  align-items: center;
+  gap: 8px;
+}
+
+.count-quantity-card input {
+  min-width: 0;
+  min-height: 52px;
+  text-align: center;
+  font-size: 1.5rem;
+}
+
+.count-quantity-card button {
+  width: 100%;
+  min-height: 48px;
+  margin: 0;
+}
+
+.count-quantity-card button[type="submit"] {
+  min-height: 52px;
+  font-weight: 800;
+}
+
+.count-quantity-card :focus-visible {
+  outline: 3px solid var(--color-primary);
+  outline-offset: 3px;
+}
+
+.count-quantity-card__identity h2 {
+  margin-block: 6px;
+}
+
+.count-quantity-card__eyebrow {
+  font-weight: 700;
+}
+
+#count-quantity-help {
+  margin: 0;
+  font-size: .9rem;
+}
+
 button.danger {
   background: var(--color-danger);
   color: #fff;
@@ -692,6 +745,11 @@ button:disabled {
   position: relative;
   width: 68%;
   aspect-ratio: 1 / 1;
+}
+
+.scan-box.store-count-scan-box {
+  position: absolute;
+  aspect-ratio: auto;
 }
 
 .scan-box .corner {
