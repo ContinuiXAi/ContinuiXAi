@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { Prisma } from "@prisma/client";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../lib/prisma.js";
@@ -44,6 +45,39 @@ export type SummaryRow = {
   byLocation: Record<string, { locationCode: string; quantity: number }>;
 };
 
+type InventoryExpectationGroup = {
+  productId: string;
+  _sum: { quantity: number | Prisma.Decimal | null };
+};
+
+type RequiredLocationHint = {
+  locationId: string;
+  location: { id: string; sortOrder: number; code: string };
+};
+
+export function buildExpectationSnapshotData(rows: InventoryExpectationGroup[], sessionId: string) {
+  return rows.map((row) => ({
+    sessionId,
+    productId: row.productId,
+    expectedStoreQty: row._sum.quantity ?? 0,
+  }));
+}
+
+export function buildLocationVisitData(rows: RequiredLocationHint[], sessionId: string) {
+  const locations = [...rows]
+    .sort((a, b) =>
+      a.location.sortOrder - b.location.sortOrder
+      || a.location.code.localeCompare(b.location.code)
+      || a.location.id.localeCompare(b.location.id),
+    );
+  const seen = new Set<string>();
+  return locations.flatMap((row) => {
+    if (seen.has(row.locationId)) return [];
+    seen.add(row.locationId);
+    return [{ sessionId, locationId: row.locationId }];
+  });
+}
+
 export function buildSummaryRows(entries: SummaryEntryInput[]): SummaryRow[] {
   const byKey = new Map<string, SummaryRow>();
   for (const entry of entries) {
@@ -81,7 +115,7 @@ async function resolveAuthorizedSite(userId: string, requestedSiteId?: string, r
         isActive: true,
         memberships: { some: { userId, isActive: true } },
       },
-      ...(role === "ADMIN" ? {} : { memberships: { some: { userId, isActive: true } } }),
+      memberships: { some: { userId, isActive: true } },
       ...(requestedSiteId ? { id: requestedSiteId } : {}),
     },
     orderBy: [{ code: "asc" }, { id: "asc" }],
@@ -94,7 +128,7 @@ async function resolveAuthorizedSite(userId: string, requestedSiteId?: string, r
   // Preserve the proven single-site pilot bootstrap: a user with an active
   // organization membership may be provisioned onto the one unambiguous site.
   // ensurePilotSiteForUser fails closed once multiple active/assigned sites exist.
-  if (role !== "ADMIN") {
+  if (!requestedSiteId && role !== "ADMIN") {
     const pilotSite = await ensurePilotSiteForUser(userId, role);
     if (pilotSite && (!requestedSiteId || pilotSite.id === requestedSiteId)) {
       return { id: pilotSite.id, organizationId: pilotSite.organizationId };
@@ -189,18 +223,80 @@ export async function storeCountRoutes(app: FastifyInstance) {
     }
 
     const result = await prisma.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${userId}))`;
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`store-count:${userId}:${authorizedSite.id}`}))`;
+      const authorizedSites = await tx.$queryRaw<Array<{ id: string; organizationId: string }>>`
+        SELECT site."id", site."organizationId"
+        FROM "Site" AS site
+        INNER JOIN "SiteMembership" AS site_membership
+          ON site_membership."siteId" = site."id"
+        INNER JOIN "Organization" AS organization
+          ON organization."id" = site."organizationId"
+        INNER JOIN "OrganizationMembership" AS organization_membership
+          ON organization_membership."organizationId" = organization."id"
+        WHERE site."id" = ${authorizedSite.id}
+          AND site_membership."userId" = ${userId}
+          AND site_membership."isActive" = TRUE
+          AND organization_membership."userId" = ${userId}
+          AND organization_membership."isActive" = TRUE
+          AND site."isActive" = TRUE
+          AND organization."isActive" = TRUE
+        FOR UPDATE OF site, site_membership, organization, organization_membership
+      `;
+      const lockedSite = authorizedSites[0];
+      if (!lockedSite) return { status: "forbidden" as const };
+
       const existing = await tx.storeCountSession.findFirst({
-        where: { status: "ACTIVE", startedById: userId, siteId: authorizedSite.id },
+        where: { status: "ACTIVE", startedById: userId, siteId: lockedSite.id },
         orderBy: { startedAt: "desc" },
       });
-      if (existing) return { created: false, session: existing };
+      if (existing) return { status: "ok" as const, created: false, session: existing };
       const session = await tx.storeCountSession.create({
-        data: { name: parsed.data.name ?? null, startedById: userId, siteId: authorizedSite.id },
+        data: { name: parsed.data.name ?? null, startedById: userId, siteId: lockedSite.id },
       });
-      return { created: true, session };
+
+      const expectationGroups = await tx.inventoryTransaction.groupBy({
+        by: ["productId"],
+        where: {
+          organizationId: lockedSite.organizationId,
+          siteId: lockedSite.id,
+          product: { organizationId: lockedSite.organizationId },
+        },
+        _sum: { quantity: true },
+        orderBy: { productId: "asc" },
+      });
+      const expectations = buildExpectationSnapshotData(expectationGroups, session.id);
+      if (expectations.length > 0) {
+        await tx.storeCountExpectation.createMany({ data: expectations });
+      }
+
+      const requiredHints = await tx.productLocationHint.findMany({
+        where: {
+          organizationId: lockedSite.organizationId,
+          siteId: lockedSite.id,
+          isRequired: true,
+          location: { siteId: lockedSite.id, isActive: true },
+          product: { organizationId: lockedSite.organizationId, isActive: true },
+        },
+        select: {
+          locationId: true,
+          location: { select: { id: true, sortOrder: true, code: true } },
+        },
+        orderBy: [
+          { location: { sortOrder: "asc" } },
+          { location: { code: "asc" } },
+          { location: { id: "asc" } },
+        ],
+      });
+      const visits = buildLocationVisitData(requiredHints, session.id);
+      if (visits.length > 0) {
+        await tx.storeCountLocationVisit.createMany({ data: visits });
+      }
+      return { status: "ok" as const, created: true, session };
     });
 
+    if (result.status === "forbidden") {
+      return reply.code(403).send({ error: "you do not have access to that site" });
+    }
     return reply.code(result.created ? 201 : 200).send(result.session);
   });
 
