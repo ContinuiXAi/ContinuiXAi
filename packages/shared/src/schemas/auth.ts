@@ -53,6 +53,7 @@ export const createUserSchema = z.object({
   email: emailSchema,
   password: passwordSchema,
   role: z.enum(["ADMIN", "GENERAL"]).default("GENERAL"),
+  organizationId: z.string().trim().min(1),
 });
 
 export const updateProfileSchema = z.object({

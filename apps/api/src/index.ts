@@ -26,6 +26,7 @@ import { storeCountExportRoutes } from "./routes/storeCountExport.js";
 import { storeLocationRoutes } from "./routes/storeLocations.js";
 import { productRoutes } from "./routes/products.js";
 import { taskRoutes } from "./routes/tasks.js";
+import { siteMembershipRoutes } from "./routes/siteMemberships.js";
 import { startExpiryNotificationJob } from "./jobs/expiryNotifications.js";
 import { startTrashPurgeJob } from "./jobs/trashPurge.js";
 import { startLowStockSummaryJob } from "./jobs/lowStockSummary.js";
@@ -34,6 +35,8 @@ import { getCachedTokenVersion } from "./lib/tokenVersion.js";
 import { isMediaAuthDisabled } from "./lib/mediaAuth.js";
 import { prisma } from "./lib/prisma.js";
 import { assertMfaEncryptionConfig } from "./lib/mfa.js";
+import { isSessionActive } from "./lib/sessionService.js";
+import { resolveBuildSha } from "./lib/buildInfo.js";
 
 const INSECURE_JWT_SECRETS = new Set(["", "changeme", "dev-secret-change-me"]);
 
@@ -53,6 +56,7 @@ function resolveJwtSecret(): string {
 
 const jwtSecret = resolveJwtSecret();
 const legacyInventoryFeaturesEnabled = process.env.ENABLE_LEGACY_INVENTORY_FEATURES === "true";
+const trustedProxyCidrs = process.env.TRUST_PROXY_CIDRS?.split(",").map((value) => value.trim()).filter(Boolean) ?? [];
 assertMfaEncryptionConfig();
 
 if (isMediaAuthDisabled()) {
@@ -60,7 +64,7 @@ if (isMediaAuthDisabled()) {
 }
 
 const app = Fastify({
-  trustProxy: process.env.TRUST_PROXY === "true" ? 1 : false,
+  trustProxy: trustedProxyCidrs.length > 0 ? trustedProxyCidrs : false,
   logger: {
     serializers: {
       req(request) {
@@ -87,9 +91,9 @@ app.decorate("authenticate", async (request, reply) => {
   // Any purpose-scoped JWT (MFA challenge, media, backup) is not a normal API session.
   if (request.user.purpose) { reply.code(401).send({ error: "unauthorized" }); return; }
   const userId = request.user.sub;
-  if (typeof request.user.tv !== "number") { reply.code(401).send({ error: "unauthorized" }); return; }
+  if (typeof request.user.tv !== "number" || typeof request.user.sid !== "string") { reply.code(401).send({ error: "unauthorized" }); return; }
   const dbTv = await getCachedTokenVersion(userId);
-  if (dbTv === null || dbTv !== request.user.tv) { reply.code(401).send({ error: "unauthorized" }); return; }
+  if (dbTv === null || dbTv !== request.user.tv || !(await isSessionActive(request.user.sid, userId, request.user.tv))) { reply.code(401).send({ error: "unauthorized" }); return; }
 });
 
 app.decorate("requireAdmin", async (request, reply) => {
@@ -98,7 +102,7 @@ app.decorate("requireAdmin", async (request, reply) => {
   if (user.role !== "ADMIN") { reply.code(403).send({ error: "admin only" }); return; }
 });
 
-app.get("/health", async () => ({ status: "ok" }));
+app.get("/health", async () => ({ status: "ok", buildSha: resolveBuildSha() }));
 
 await app.register(authRoutes, { prefix: "/api/auth" });
 await app.register(mfaRoutes, { prefix: "/api/auth" });
@@ -110,6 +114,7 @@ await app.register(storeLocationRoutes, { prefix: "/api/store-locations" });
 await app.register(storeCountRoutes, { prefix: "/api/store-count" });
 await app.register(storeCountExportRoutes, { prefix: "/api/store-count" });
 await app.register(taskRoutes, { prefix: "/api/tasks" });
+await app.register(siteMembershipRoutes, { prefix: "/api/site-memberships" });
 await app.register(attachmentRoutes, { prefix: "/api/attachments" });
 await app.register(mediaAttachmentRoutes, { prefix: "/api/attachments" });
 

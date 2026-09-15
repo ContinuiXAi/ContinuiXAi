@@ -42,6 +42,9 @@ jobs:
           DATABASE_URL: postgresql://dummy:dummy@localhost:5432/dummy
         run: npm run prisma:generate -w apps/api
       - name: Run Build
+        env:
+          BUILD_SHA: ${{ github.sha }}
+          NEXT_PUBLIC_BUILD_SHA: ${{ github.sha }}
         run: npm run build
 
   test:
@@ -107,6 +110,8 @@ jobs:
         run: npx prisma migrate status
       - name: Confirm migrated database matches schema.prisma exactly
         run: npx prisma migrate diff --exit-code --from-config-datasource --to-schema=prisma/schema.prisma
+      - name: Validate populated multi-site membership backfill
+        run: npx tsx scripts/siteMembershipBackfillValidation.ts
       - name: Exercise first-user bootstrap on a fresh PostgreSQL database
         run: npx tsx scripts/freshPilotBootstrapValidation.ts
       - name: Exercise the real Store Count HTTP route on PostgreSQL
@@ -117,6 +122,8 @@ jobs:
         run: npx tsx scripts/emptyCountCompletionValidation.ts
       - name: Validate commercial tenant and append-only ledger integrity
         run: npx tsx scripts/commercialFoundationValidation.ts
+      - name: Validate versioned product composition concurrency and rollback
+        run: npx tsx scripts/productCompositionDbValidation.ts
       - name: Validate role-based task scoping and recurrence idempotency
         run: npx tsx scripts/taskFoundationValidation.ts
       - name: Exercise atomic counting and idempotent retries on PostgreSQL

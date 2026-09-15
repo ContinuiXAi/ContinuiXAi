@@ -55,6 +55,16 @@
   display: none;
 }
 
+@media (prefers-color-scheme: dark) {
+  .brand-lockup__name {
+    color: var(--brand-teal);
+  }
+}
+
 [data-theme="dark"] .brand-lockup__name {
-  color: #ffffff;
+  color: var(--brand-teal);
+}
+
+[data-theme="light"] .brand-lockup__name {
+  color: var(--brand-navy);
 }
