@@ -1,9 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { BarcodeFormat } from "@zxing/library";
-import { isQrScanFormat, symbologyFromScanFormat } from "./barcodeScanner";
+import { BarcodeFormat, DecodeHintType } from "@zxing/library";
+import { createScanHints, getScannerFocusRegion, isQrScanFormat, symbologyFromScanFormat } from "./barcodeScanner";
 
-// 하드코딩한 FORMAT_* 숫자가 @zxing/library enum과 어긋나면
-// EAN13이 OTHER로 저장되는 등 조용한 데이터 오염이 난다 — Dependabot 업그레이드 시 여기서 터지게 한다.
 describe("barcodeScanner format constants vs @zxing/library", () => {
   it("maps BarcodeFormat enum values to the expected symbology", () => {
     expect(symbologyFromScanFormat(BarcodeFormat.EAN_13)).toBe("EAN13");
@@ -17,5 +15,29 @@ describe("barcodeScanner format constants vs @zxing/library", () => {
   it("detects QR via the library enum value", () => {
     expect(isQrScanFormat(BarcodeFormat.QR_CODE)).toBe(true);
     expect(isQrScanFormat(BarcodeFormat.EAN_13)).toBe(false);
+  });
+
+  it("enables aggressive decoding for live retail UPC/EAN camera scans", async () => {
+    const hints = await createScanHints();
+    expect(hints.get(DecodeHintType.TRY_HARDER)).toBe(true);
+    expect(hints.get(DecodeHintType.POSSIBLE_FORMATS)).toEqual([
+      BarcodeFormat.EAN_13,
+      BarcodeFormat.EAN_8,
+      BarcodeFormat.UPC_A,
+      BarcodeFormat.UPC_E,
+      BarcodeFormat.CODE_128,
+      BarcodeFormat.QR_CODE,
+    ]);
+  });
+
+  it("crops live video to the center scan guide so retail barcodes occupy more pixels", () => {
+    expect(getScannerFocusRegion(1280, 720)).toEqual({
+      sx: 128,
+      sy: 180,
+      sw: 1024,
+      sh: 360,
+      outputWidth: 1280,
+      outputHeight: 450,
+    });
   });
 });

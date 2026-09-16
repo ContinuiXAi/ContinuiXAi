@@ -1,4 +1,4 @@
-const CACHE_NAME = "continuixai-ops-shell-v8";
+const CACHE_NAME = "continuixai-ops-shell-v9";
 const SHELL_ASSETS = [
   "/",
   "/login",
@@ -28,7 +28,13 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("fetch", (event) => {
   const { request } = event;
-  if (request.url.includes("/api/")) return;
+  if (
+    request.url.includes("/api/") ||
+    request.destination === "manifest" ||
+    request.destination === "image" ||
+    new URL(request.url).pathname === "/apple-touch-icon.png"
+  ) return;
+
   event.respondWith(
     fetch(request)
       .then((response) => {

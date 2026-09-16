@@ -5,7 +5,9 @@ import { useRouter } from "next/navigation";
 import { apiFetch, apiJson } from "../../lib/api";
 import { useAuth } from "../../lib/auth-context";
 import { useToast } from "../../lib/toast-context";
-import { humanizeEnum } from "../../lib/taskPresentation";
+import { humanizeEnum, isCountTask } from "../../lib/taskPresentation";
+import { BRAND_NAME } from "../../lib/brand";
+import { BrandLockup } from "../../components/BrandLockup";
 import type {
   JobTitle,
   TaskAssignment,
@@ -29,7 +31,6 @@ const JOB_TITLES: JobTitle[] = [
 ];
 const PRIORITIES: TaskPriority[] = ["LOW", "NORMAL", "HIGH", "URGENT"];
 const ROLLOVER: TaskRolloverPolicy[] = ["REMAIN_OVERDUE", "ROLL_FORWARD", "SKIP"];
-
 
 function templatePayload(form: TemplateForm) {
   return {
@@ -96,6 +97,8 @@ export default function TeamWorkPage() {
   const [oneTimeDue, setOneTimeDue] = useState("");
   const [oneTimePriority, setOneTimePriority] = useState<TaskPriority>("NORMAL");
   const [managerNotes, setManagerNotes] = useState<Record<string, string>>({});
+  const [countAssignees, setCountAssignees] = useState<Record<string, string>>({});
+  const [countHandoffBusy, setCountHandoffBusy] = useState<string | null>(null);
   const [period, setPeriod] = useState<"DAILY" | "WEEKLY" | "MONTHLY">("DAILY");
   const [anchor, setAnchor] = useState("");
   const [busy, setBusy] = useState(false);
@@ -145,7 +148,7 @@ export default function TeamWorkPage() {
   }
 
   async function installStarterLibrary() {
-    if (!window.confirm("Install any missing Continuixai Ops starter templates for all six job titles? Existing templates will not be replaced.")) return;
+    if (!window.confirm(`Install any missing ${BRAND_NAME} starter templates for all six job titles? Existing templates will not be replaced.`)) return;
     try {
       const result = await apiJson<{ installed: number; existing: number; totalCatalog: number }>("/api/tasks/templates/starter-library", { method: "POST" });
       await refreshAll();
@@ -229,13 +232,36 @@ export default function TeamWorkPage() {
     await updateAssignment(task, { managerNote: value.trim() || null });
   }
 
+  async function handOffCount(countId: string, currentAssigneeId?: string | null) {
+    const toUserId = countAssignees[countId] ?? currentAssigneeId ?? "";
+    if (!toUserId || toUserId === currentAssigneeId || countHandoffBusy) return;
+    setCountHandoffBusy(countId);
+    try {
+      await apiJson(`/api/inventory-truth/counts/${encodeURIComponent(countId)}/reassign`, {
+        method: "POST",
+        body: JSON.stringify({ toUserId }),
+      });
+      setCountAssignees((current) => {
+        const next = { ...current };
+        delete next[countId];
+        return next;
+      });
+      await refreshAll();
+      show("Count handed off. Saved progress and ownership history were kept.", "success");
+    } catch (err) {
+      show(err instanceof Error ? err.message : "Could not hand off count.", "error");
+    } finally {
+      setCountHandoffBusy(null);
+    }
+  }
+
   async function downloadReport() {
     try {
       const response = await apiFetch(`/api/tasks/reports.csv?period=${period}&anchor=${anchor}`);
       if (!response.ok) throw new Error(`Report export failed (${response.status})`);
       const blob = await response.blob();
       const disposition = response.headers.get("content-disposition") ?? "";
-      const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] ?? `continuixai-ops-${period.toLowerCase()}-${anchor}.csv`;
+      const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] ?? `ContinuiXai-${period.toLowerCase()}-${anchor}.csv`;
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a"); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
       show("Report downloaded.", "success");
@@ -246,12 +272,12 @@ export default function TeamWorkPage() {
   const inactiveTemplates = useMemo(() => templates.filter((template) => !template.isActive), [templates]);
 
   if (loading || !user) return null;
-  if (accessError) return <main className="container work-container"><header className="work-hero compact"><div className="work-brand">Continuixai Ops</div><h1>Team Work</h1></header><section className="card"><p className="error-text">{accessError}</p><button type="button" className="secondary" onClick={() => router.push("/my-work")}>Back to My Work</button></section></main>;
+  if (accessError) return <main className="container work-container"><header className="work-hero compact"><BrandLockup compact /><h1>Team Work</h1></header><section className="card"><p className="error-text">{accessError}</p><button type="button" className="secondary" onClick={() => router.push("/my-work")}>Back to My Work</button></section></main>;
 
   return (
     <main className="container manager-container">
       <header className="work-hero compact">
-        <div className="work-brand">Continuixai Ops</div>
+        <BrandLockup compact />
         <h1>Team Work</h1>
         <p>{team?.site.name || team?.site.code || "Current site"} · manage assignments, recurring work, and results.</p>
       </header>
@@ -318,15 +344,37 @@ export default function TeamWorkPage() {
       </section>
 
       <section className="manager-section">
+        <div className="manager-section-title"><div><h2>Active counts</h2><p>Hand off the actual active count. Saved count progress and ownership history stay with the count.</p></div><span>{team?.activeCounts.length ?? 0} active</span></div>
+        <div className="manager-table-list">
+          {team?.activeCounts.map((count) => {
+            const selectedAssignee = countAssignees[count.id] ?? count.assignedToId ?? "";
+            return <article className="card manager-row manager-assignment" key={count.id}>
+              <div className="manager-assignment-main">
+                <strong>{count.name || "Store count"}</strong>
+                <div className="manager-muted">Current owner: {count.assignedTo?.name ?? "Unassigned"} · started {new Date(count.startedAt).toLocaleString()}</div>
+                {count.assignmentEvents.length > 0 && <details><summary>Ownership history</summary><ul className="manager-history">{count.assignmentEvents.map((event) => <li key={event.id}>{event.fromUser?.name ?? "Started"} → {event.toUser.name} · by {event.assignedBy.name}{event.reason ? ` · ${event.reason}` : ""}</li>)}</ul></details>}
+              </div>
+              <div className="manager-assignment-controls">
+                <label>Count owner<select aria-label={`Count owner for ${count.name || "Store count"}`} value={selectedAssignee} onChange={(event) => setCountAssignees((current) => ({ ...current, [count.id]: event.target.value }))}>{employees.map((employee) => <option key={employee.id} value={employee.id}>{employee.name}</option>)}</select></label>
+                <button type="button" disabled={!selectedAssignee || selectedAssignee === count.assignedToId || countHandoffBusy !== null} onClick={() => void handOffCount(count.id, count.assignedToId)}>{countHandoffBusy === count.id ? "Handing off…" : "Hand off count"}</button>
+              </div>
+            </article>;
+          })}
+          {team?.activeCounts.length === 0 && <p className="work-empty">No active counts at this site.</p>}
+        </div>
+      </section>
+
+      <section className="manager-section">
         <div className="manager-section-title"><div><h2>Team status</h2><p>Open, overdue, completed, skipped, and cancelled work.</p></div><span>{team?.assignments.length ?? 0} assignments</span></div>
         <div className="manager-table-list">
           {team?.assignments.map((task) => (
             <article className="card manager-row manager-assignment" key={task.id}>
               <div className="manager-assignment-main"><strong>{task.title}</strong><div className="manager-muted">{task.assignedTo?.name ?? task.assignedToId} · {task.scheduledDate.slice(0,10)} · {humanizeEnum(task.priority)} · {humanizeEnum(task.status)}</div>{task.employeeNote && <p><strong>Employee note:</strong> {task.employeeNote}</p>}{task.events && task.events.length > 0 && <details><summary>History</summary><ul className="manager-history">{task.events.map((event) => <li key={event.id}>{humanizeEnum(event.action)} · {new Date(event.createdAt).toLocaleString()}</li>)}</ul></details>}</div>
               <div className="manager-assignment-controls">
-                <label>Assigned to<select value={task.assignedToId} onChange={(e) => void updateAssignment(task, { assignedToId: e.target.value })} disabled={task.status === "COMPLETED"}>{employees.map((employee) => <option key={employee.id} value={employee.id}>{employee.name}</option>)}</select></label>
+                <label>{isCountTask(task) ? "Task owner (not count)" : "Assigned to"}<select value={task.assignedToId} onChange={(e) => void updateAssignment(task, { assignedToId: e.target.value })} disabled={task.status === "COMPLETED"}>{employees.map((employee) => <option key={employee.id} value={employee.id}>{employee.name}</option>)}</select></label>
                 <textarea rows={2} maxLength={2000} value={managerNotes[task.id] ?? task.managerNote ?? ""} onChange={(e) => setManagerNotes((notes) => ({ ...notes, [task.id]: e.target.value }))} placeholder="Manager note" />
-                <div className="manager-actions"><button type="button" className="secondary" onClick={() => void saveManagerNote(task)}>Save note</button>{task.status === "COMPLETED" ? <button type="button" onClick={() => void updateAssignment(task, { status: "OPEN" })}>Reopen</button> : <><button type="button" onClick={() => void updateAssignment(task, { status: "COMPLETED" })}>Complete</button><button type="button" className="secondary" onClick={() => void updateAssignment(task, { status: "SKIPPED" })}>Skip</button><button type="button" className="secondary" onClick={() => void updateAssignment(task, { status: "CANCELLED" })}>Cancel</button></>}</div>
+                {isCountTask(task) && <p className="manager-muted">Task changes do not hand off or finish the active count. Use Active counts above.</p>}
+                <div className="manager-actions"><button type="button" className="secondary" onClick={() => void saveManagerNote(task)}>Save note</button>{task.status === "COMPLETED" ? <button type="button" onClick={() => void updateAssignment(task, { status: "OPEN" })}>Reopen</button> : <><button type="button" onClick={() => void updateAssignment(task, { status: "COMPLETED" })}>{isCountTask(task) ? "Complete task only" : "Complete"}</button><button type="button" className="secondary" onClick={() => void updateAssignment(task, { status: "SKIPPED" })}>Skip</button><button type="button" className="secondary" onClick={() => void updateAssignment(task, { status: "CANCELLED" })}>Cancel</button></>}</div>
               </div>
             </article>
           ))}

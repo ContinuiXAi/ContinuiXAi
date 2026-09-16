@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
 import "./globals.css";
+import "./brand.css";
 import { RegisterServiceWorker } from "./register-sw";
 import { AuthProvider } from "../lib/auth-context";
 import { ToastProvider } from "../lib/toast-context";
@@ -8,19 +9,22 @@ import { ThemeProvider } from "../lib/theme-context";
 import { LocaleProvider } from "../lib/i18n/locale-context";
 import { BottomNav } from "../components/BottomNav";
 import { OfflineBanner } from "../components/OfflineBanner";
+import { RetailScannerAssist } from "../components/RetailScannerAssist";
+import { BRAND_NAME, BRAND_TAGLINE } from "../lib/brand";
+import { BuildMarker } from "../components/BuildMarker";
 
 const THEME_INIT_SCRIPT = `(function(){try{var t=localStorage.getItem("continuixai_theme");if(t==="light"||t==="dark"){document.documentElement.setAttribute("data-theme",t);}}catch(e){}})();`;
 
 export const metadata: Metadata = {
   title: {
-    default: "Continuixai Ops",
-    template: "%s · Continuixai Ops",
+    default: BRAND_NAME,
+    template: `%s · ${BRAND_NAME}`,
   },
-  description: "Mobile-first barcode scanning, product identification, store counting, and inventory organization.",
-  applicationName: "Continuixai Ops",
+  description: `${BRAND_TAGLINE} Mobile-first operations, barcode scanning, store counting, inventory, distribution, and team work management.`,
+  applicationName: BRAND_NAME,
   appleWebApp: {
     capable: true,
-    title: "Continuixai Ops",
+    title: BRAND_NAME,
     statusBarStyle: "default",
   },
   formatDetection: {
@@ -38,8 +42,8 @@ export const viewport: Viewport = {
   maximumScale: 1,
   viewportFit: "cover",
   themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#1d5fa8" },
-    { media: "(prefers-color-scheme: dark)", color: "#121212" },
+    { media: "(prefers-color-scheme: light)", color: "#16235A" },
+    { media: "(prefers-color-scheme: dark)", color: "#0E1733" },
   ],
 };
 
@@ -51,12 +55,14 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       </head>
       <body>
         <RegisterServiceWorker />
+        <RetailScannerAssist />
         <LocaleProvider>
           <ThemeProvider>
             <ToastProvider>
               <AuthProvider>
                 <OfflineBanner />
                 {children}
+                <BuildMarker />
                 <BottomNav />
               </AuthProvider>
             </ToastProvider>

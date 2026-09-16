@@ -3,6 +3,7 @@ import jwt from "@fastify/jwt";
 import { prisma } from "../src/lib/prisma.js";
 import { productRoutes } from "../src/routes/products.js";
 import { storeCountRoutes } from "../src/routes/storeCount.js";
+import { inventoryTruthRoutes } from "../src/routes/inventoryTruth.js";
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -34,6 +35,7 @@ async function main() {
   });
   await app.register(productRoutes, { prefix: "/api/products" });
   await app.register(storeCountRoutes, { prefix: "/api/store-count" });
+  await app.register(inventoryTruthRoutes, { prefix: "/api/inventory-truth" });
   await app.ready();
 
   let adminId: string | null = null;
@@ -59,13 +61,17 @@ async function main() {
       { organizationId: organization.id, userId: user.id, role: "INVENTORY", isActive: true },
     ] });
     const site = await prisma.site.create({ data: { organizationId: organization.id, code: siteCode, name: "Route validation site", type: "STORE", isActive: true } });
+    await prisma.siteMembership.createMany({ data: [
+      { siteId: site.id, userId: admin.id, isActive: true },
+      { siteId: site.id, userId: user.id, isActive: true },
+    ] });
     const location = await prisma.storeLocation.create({ data: { siteId: site.id, code: locationCode, name: "Route validation location", isActive: true } });
     locationId = location.id;
     await prisma.product.createMany({ data: [
-      { barcodeValue: barcodeAtomic, name: "Atomic route product", isActive: true },
-      { barcodeValue: barcodeRetry, name: "Retry route product", isActive: true },
-      { barcodeValue: barcodeConflict, name: "Conflict route product", isActive: true },
-      { barcodeValue: barcodeZero, name: "Confirmed-zero route product", isActive: true },
+      { organizationId, barcodeValue: barcodeAtomic, name: "Atomic route product", isActive: true },
+      { organizationId, barcodeValue: barcodeRetry, name: "Retry route product", isActive: true },
+      { organizationId, barcodeValue: barcodeConflict, name: "Conflict route product", isActive: true },
+      { organizationId, barcodeValue: barcodeZero, name: "Confirmed-zero route product", isActive: true },
     ] });
 
     const adminToken = app.jwt.sign({ sub: admin.id, role: "ADMIN", tv: 0 });
@@ -139,16 +145,13 @@ async function main() {
     assert(adminConflict.statusCode === 200, `admin conflict setup returned ${adminConflict.statusCode}: ${adminConflict.body}`);
     const userConflictKey = `route-conflict-user-${suffix}`;
     const collaborator = await app.inject({ method: "POST", url: `/api/store-count/sessions/${sessionId}/scan`, headers: auth(userToken), payload: { barcodeValue: barcodeConflict, locationId: location.id, quantityDelta: 1, clientScanId: userConflictKey } });
-    assert(collaborator.statusCode === 200, `authorized collaborator scan returned ${collaborator.statusCode}: ${collaborator.body}`);
-    const collaboratorEntry = parseJson<{ quantity: number; countedByUserId: string | null; countedByDifferentUser: boolean; previousCounterName: string | null }>(collaborator.body);
-    assert(collaboratorEntry.quantity === 2, `cross-user scan produced quantity ${collaboratorEntry.quantity}, expected 2`);
-    assert(collaboratorEntry.countedByUserId === user.id, "entry does not identify the latest employee");
-    assert(collaboratorEntry.countedByDifferentUser === true, "cross-user scan did not surface contamination warning");
-    assert(collaboratorEntry.previousCounterName === admin.name, "cross-user warning did not identify prior counter");
+    assert(collaborator.statusCode === 403, `non-assignee scan returned ${collaborator.statusCode}: ${collaborator.body}`);
+    const unchangedEntry = await prisma.storeCountEntry.findUniqueOrThrow({ where: { sessionId_locationId_barcodeValue: { sessionId, locationId: location.id, barcodeValue: barcodeConflict } } });
+    assert(unchangedEntry.quantity === 1 && unchangedEntry.countedByUserId === admin.id, "non-assignee changed count evidence");
     const actorLogs = await prisma.storeCountScanLog.findMany({ where: { idempotencyKey: { in: [adminConflictKey, userConflictKey] } }, orderBy: { createdAt: "asc" } });
-    assert(actorLogs.length === 2, `expected two actor scan logs, found ${actorLogs.length}`);
+    assert(actorLogs.length === 1, `expected one authorized actor scan log, found ${actorLogs.length}`);
     assert(actorLogs.some((log) => log.userId === admin.id), "scan log missing admin actor");
-    assert(actorLogs.some((log) => log.userId === user.id), "scan log missing collaborator actor");
+    assert(!actorLogs.some((log) => log.userId === user.id), "non-assignee wrote a scan log");
 
     const userSessionResponse = await app.inject({ method: "POST", url: "/api/store-count/sessions", headers: auth(userToken), payload: { name: "Second-user session", siteId: site.id } });
     assert(userSessionResponse.statusCode === 201, `second user session returned ${userSessionResponse.statusCode}: ${userSessionResponse.body}`);
@@ -156,9 +159,17 @@ async function main() {
     const conflictKey = `route-cross-session-${suffix}`;
     const firstConflictKeyUse = await app.inject({ method: "POST", url: `/api/store-count/sessions/${sessionId}/scan`, headers: auth(adminToken), payload: { barcodeValue: barcodeConflict, locationId: location.id, quantityDelta: 1, clientScanId: conflictKey } });
     assert(firstConflictKeyUse.statusCode === 200, `first idempotency-key use returned ${firstConflictKeyUse.statusCode}`);
-    const crossSessionReuse = await app.inject({ method: "POST", url: `/api/store-count/sessions/${userSessionId}/scan`, headers: auth(adminToken), payload: { barcodeValue: barcodeConflict, locationId: location.id, quantityDelta: 1, clientScanId: conflictKey } });
+    const crossSessionReuse = await app.inject({ method: "POST", url: `/api/store-count/sessions/${userSessionId}/scan`, headers: auth(userToken), payload: { barcodeValue: barcodeConflict, locationId: location.id, quantityDelta: 1, clientScanId: conflictKey } });
     assert(crossSessionReuse.statusCode === 409, `cross-session idempotency-key reuse returned ${crossSessionReuse.statusCode}, expected 409`);
 
+    const unexplainedFinish = await app.inject({ method: "POST", url: `/api/store-count/sessions/${sessionId}/complete`, headers: auth(adminToken) });
+    assert(unexplainedFinish.statusCode === 409, `unexplained actual-only overages completed: ${unexplainedFinish.body}`);
+    const differences = await prisma.storeCountDiscrepancy.findMany({ where: { sessionId, status: "OPEN" } });
+    assert(differences.length > 0, "positive observations without baseline must create discrepancies");
+    for (const difference of differences) {
+      const explanation = await app.inject({ method: "PATCH", url: `/api/inventory-truth/counts/${sessionId}/discrepancies/${difference.id}/explain`, headers: auth(adminToken), payload: { reason: "OTHER_MANAGER_REVIEW", note: "Disposable fixture has no opening baseline; physical quantity checked." } });
+      assert(explanation.statusCode === 200, `explanation failed: ${explanation.statusCode} ${explanation.body}`);
+    }
     const completeResponse = await app.inject({ method: "POST", url: `/api/store-count/sessions/${sessionId}/complete`, headers: auth(adminToken) });
     assert(completeResponse.statusCode === 200, `session completion returned ${completeResponse.statusCode}: ${completeResponse.body}`);
     const completedScan = await app.inject({ method: "POST", url: `/api/store-count/sessions/${sessionId}/scan`, headers: auth(adminToken), payload: { barcodeValue: barcodeAtomic, locationId: location.id, quantityDelta: 1, clientScanId: `route-after-complete-${suffix}` } });
@@ -173,12 +184,14 @@ async function main() {
     console.log("- 20 concurrent unique HTTP scans => quantity 20");
     console.log("- 10 concurrent HTTP retries with one clientScanId => quantity 1");
     console.log("- confirmed zero remains persisted and visible in the location summary");
-    console.log("- scan logs preserve employee attribution and cross-user edits return a warning");
+    console.log("- non-assignee capture is denied without entry or scan-log mutation");
+    console.log("- unexplained overages reject Finish; explicit employee explanations permit completion");
     console.log("- clientScanId reuse across sessions => HTTP 409");
     console.log("- completed sessions reject new scans with HTTP 409 and preserve prior quantity");
   } finally {
     if (organizationId) {
       const siteIds = (await prisma.site.findMany({ where: { organizationId }, select: { id: true } })).map((site) => site.id);
+      await prisma.storeCountAssignmentEvent.deleteMany({ where: { session: { siteId: { in: siteIds } } } });
       if (siteIds.length > 0) await prisma.storeCountSession.deleteMany({ where: { siteId: { in: siteIds } } });
     }
     if (locationId) await prisma.storeLocation.deleteMany({ where: { id: locationId } });

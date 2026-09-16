@@ -1,10 +1,23 @@
 import type { FastifyInstance } from "fastify";
 import { productInputSchema, productUpdateSchema } from "@continuixai/shared";
+import { z } from "zod";
 import { prisma } from "../lib/prisma.js";
 import { isUniqueConstraintError } from "../lib/prismaErrors.js";
 import { resolveOrganizationContext } from "../lib/organizationContext.js";
+import {
+  MAX_INVENTORY_QUANTITY,
+  aggregateCompositionDefinition,
+} from "../lib/packagingResolution.js";
 
 type ProductQuery = { q?: string; includeInactive?: string; organizationId?: string };
+
+const compositionInputSchema = z.object({
+  parentPackagingId: z.string().trim().min(1),
+  components: z.array(z.object({
+    componentProductId: z.string().trim().min(1),
+    quantityPerParent: z.number().int().positive().max(MAX_INVENTORY_QUANTITY),
+  })).min(1),
+}).strict();
 
 async function organizationForRequest(request: {
   user: { sub: string; role?: string };
@@ -53,6 +66,132 @@ export async function productRoutes(app: FastifyInstance) {
     });
     if (!product) return reply.code(404).send({ error: "product not found" });
     return product;
+  });
+
+  app.get("/:id/compositions", async (request, reply) => {
+    const context = await organizationForRequest(request);
+    if (!context) return reply.code(400).send({ error: "select one authorized organization" });
+    const { id } = request.params as { id: string };
+    const parentProduct = await prisma.product.findFirst({
+      where: { id, organizationId: context.organizationId },
+      select: { id: true },
+    });
+    if (!parentProduct) return reply.code(404).send({ error: "product not found" });
+
+    return prisma.productComposition.findMany({
+      where: {
+        parentPackaging: {
+          productId: id,
+          product: { organizationId: context.organizationId },
+        },
+        componentProduct: { organizationId: context.organizationId },
+      },
+      include: {
+        parentPackaging: true,
+        componentProduct: true,
+      },
+      orderBy: [
+        { parentPackagingId: "asc" },
+        { version: "desc" },
+        { componentProductId: "asc" },
+      ],
+    });
+  });
+
+  app.post("/:id/compositions", async (request, reply) => {
+    const context = await organizationForRequest(request);
+    if (!context) return reply.code(400).send({ error: "select one authorized organization" });
+    const parsed = compositionInputSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    const { id } = request.params as { id: string };
+
+    let components: ReturnType<typeof aggregateCompositionDefinition>;
+    try {
+      components = aggregateCompositionDefinition(parsed.data.components, id);
+    } catch (error) {
+      return reply.code(400).send({
+        error: error instanceof Error ? error.message : "Invalid composition",
+      });
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      const authorizedMemberships = await tx.$queryRaw<Array<{ organizationId: string }>>`
+        SELECT membership."organizationId"
+        FROM "OrganizationMembership" AS membership
+        INNER JOIN "Organization" AS organization
+          ON organization."id" = membership."organizationId"
+        WHERE membership."userId" = ${request.user.sub}
+          AND membership."organizationId" = ${context.organizationId}
+          AND membership."isActive" = TRUE
+          AND membership."role" IN ('OWNER', 'ADMIN', 'MANAGER')
+          AND organization."isActive" = TRUE
+        FOR UPDATE OF membership, organization
+      `;
+      if (authorizedMemberships.length !== 1) return { status: "forbidden" as const };
+
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`product-composition:${context.organizationId}:${parsed.data.parentPackagingId}`}))`;
+
+      const parentPackaging = await tx.productPackaging.findFirst({
+        where: {
+          id: parsed.data.parentPackagingId,
+          productId: id,
+          isActive: true,
+          product: { organizationId: context.organizationId, isActive: true },
+        },
+        select: { id: true, productId: true },
+      });
+      if (!parentPackaging) return { status: "parent-not-found" as const };
+
+      const componentProductIds = components.map((component) => component.productId);
+      const componentProducts = await tx.product.findMany({
+        where: {
+          id: { in: componentProductIds },
+          organizationId: context.organizationId,
+          isActive: true,
+        },
+        select: { id: true },
+      });
+      if (componentProducts.length !== componentProductIds.length) {
+        return { status: "component-not-found" as const };
+      }
+
+      const latest = await tx.productComposition.aggregate({
+        where: { parentPackagingId: parentPackaging.id },
+        _max: { version: true },
+      });
+      const version = (latest._max.version ?? 0) + 1;
+
+      await tx.productComposition.updateMany({
+        where: { parentPackagingId: parentPackaging.id, isActive: true },
+        data: { isActive: false },
+      });
+      await tx.productComposition.createMany({
+        data: components.map((component) => ({
+          parentPackagingId: parentPackaging.id,
+          componentProductId: component.productId,
+          quantityPerParent: component.eachQuantity,
+          version,
+          isActive: true,
+        })),
+      });
+      const created = await tx.productComposition.findMany({
+        where: { parentPackagingId: parentPackaging.id, version },
+        include: { componentProduct: true },
+        orderBy: { componentProductId: "asc" },
+      });
+      return { status: "created" as const, created };
+    });
+
+    if (result.status === "forbidden") {
+      return reply.code(403).send({ error: "manager access required" });
+    }
+    if (result.status === "parent-not-found") {
+      return reply.code(404).send({ error: "parent packaging not found" });
+    }
+    if (result.status === "component-not-found") {
+      return reply.code(404).send({ error: "component product not found" });
+    }
+    return reply.code(201).send(result.created);
   });
 
   app.get("/:id", async (request, reply) => {

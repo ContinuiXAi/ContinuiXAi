@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { useState, type FormEvent } from "react";
 import { API_URL } from "../../lib/api";
+import { BRAND_NAME } from "../../lib/brand";
+import { BrandLockup } from "../../components/BrandLockup";
 
 export default function ForgotUserIdPage() {
   const [email, setEmail] = useState("");
@@ -23,20 +25,16 @@ export default function ForgotUserIdPage() {
         body: JSON.stringify({ email, recoveryPin: pin }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setError("We could not verify that account. Check your email and Recovery PIN, or use Need Help.");
-        return;
-      }
+      if (!res.ok) { setError("We could not verify that account. Check your email and Recovery PIN, or use Need Help."); return; }
       setEmployeeNumber(data.employeeNumber || "No Employee Number is assigned to this older account.");
     } catch {
-      setError("Unable to connect to Continuixai Ops. Please try again.");
-    } finally {
-      setLoading(false);
-    }
+      setError(`Unable to connect to ${BRAND_NAME}. Please try again.`);
+    } finally { setLoading(false); }
   }
 
   return (
     <main className="container">
+      <div style={{ margin: "24px 0" }}><BrandLockup /></div>
       <h1>Forgot User ID?</h1>
       <p>Verify your identity with your email address and 6-digit Recovery PIN.</p>
       <form onSubmit={submit} className="form">

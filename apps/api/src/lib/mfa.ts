@@ -1,9 +1,6 @@
-import { createCipheriv, createDecipheriv, createHmac, createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import bcrypt from "bcryptjs";
-
-const BASE32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-const STEP_SECONDS = 30;
-const DIGITS = 6;
+import * as OTPAuth from "otpauth";
 
 function key(): Buffer {
   const source = process.env.MFA_ENCRYPTION_KEY || "dev-mfa-encryption-key-change-me";
@@ -22,41 +19,18 @@ export function assertMfaEncryptionConfig(): void {
 }
 
 export function generateTotpSecret(): string {
-  const bytes = randomBytes(20);
-  let bits = "";
-  for (const b of bytes) bits += b.toString(2).padStart(8, "0");
-  let out = "";
-  for (let i = 0; i < bits.length; i += 5) out += BASE32[Number.parseInt(bits.slice(i, i + 5).padEnd(5, "0"), 2)];
-  return out;
+  return new OTPAuth.Secret({ size: 20 }).base32;
 }
-
-function decodeBase32(input: string): Buffer {
-  const clean = input.toUpperCase().replace(/=+$/g, "").replace(/[^A-Z2-7]/g, "");
-  let bits = "";
-  for (const c of clean) bits += BASE32.indexOf(c).toString(2).padStart(5, "0");
-  const bytes: number[] = [];
-  for (let i = 0; i + 8 <= bits.length; i += 8) bytes.push(Number.parseInt(bits.slice(i, i + 8), 2));
-  return Buffer.from(bytes);
-}
-
-function codeFor(secret: string, counter: number): string {
-  const msg = Buffer.alloc(8);
-  msg.writeBigUInt64BE(BigInt(counter));
-  const digest = createHmac("sha1", decodeBase32(secret)).update(msg).digest();
-  const offset = digest[digest.length - 1] & 0x0f;
-  const value = ((digest[offset] & 0x7f) << 24) | (digest[offset + 1] << 16) | (digest[offset + 2] << 8) | digest[offset + 3];
-  return String(value % 10 ** DIGITS).padStart(DIGITS, "0");
+export function findTotpCounter(secret: string, code: string, now = Date.now()): bigint | null {
+  const normalized = code.replace(/\s/g, "");
+  if (!/^\d{6}$/.test(normalized)) return null;
+  const totp = new OTPAuth.TOTP({ issuer: "ContinuiXAi Ops", algorithm: "SHA1", digits: 6, period: 30, secret: OTPAuth.Secret.fromBase32(secret) });
+  const delta = totp.validate({ token: normalized, timestamp: now, window: 1 });
+  return delta === null ? null : BigInt(Math.floor(now / 30_000) + delta);
 }
 
 export function verifyTotp(secret: string, code: string, now = Date.now()): boolean {
-  const normalized = code.replace(/\s/g, "");
-  if (!/^\d{6}$/.test(normalized)) return false;
-  const counter = Math.floor(now / 1000 / STEP_SECONDS);
-  for (let drift = -1; drift <= 1; drift += 1) {
-    const expected = codeFor(secret, counter + drift);
-    if (timingSafeEqual(Buffer.from(expected), Buffer.from(normalized))) return true;
-  }
-  return false;
+  return findTotpCounter(secret, code, now) !== null;
 }
 
 export function encryptSecret(secret: string): string {
@@ -75,8 +49,7 @@ export function decryptSecret(payload: string): string {
 }
 
 export function otpauthUri(secret: string, account: string): string {
-  const issuer = "Continuixai Ops";
-  return `otpauth://totp/${encodeURIComponent(issuer)}:${encodeURIComponent(account)}?secret=${secret}&issuer=${encodeURIComponent(issuer)}&algorithm=SHA1&digits=6&period=30`;
+  return new OTPAuth.TOTP({ issuer: "ContinuiXAi Ops", label: account, algorithm: "SHA1", digits: 6, period: 30, secret: OTPAuth.Secret.fromBase32(secret) }).toString();
 }
 
 export function generateBackupCodes(): string[] {

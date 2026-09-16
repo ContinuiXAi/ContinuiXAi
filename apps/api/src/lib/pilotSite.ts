@@ -51,24 +51,25 @@ export async function ensurePilotSiteForUser(userId: string, role?: string): Pro
         },
       },
     });
-    if (organizations.length !== 1 || organizations[0].sites.length !== 1) return null;
-
-    const organization = organizations[0];
-    await prisma.organizationMembership.upsert({
-      where: { organizationId_userId: { organizationId: organization.id, userId } },
-      update: { isActive: true, role: "INVENTORY" },
-      create: { organizationId: organization.id, userId, role: "INVENTORY" },
-    });
-    await prisma.siteMembership.upsert({
-      where: { siteId_userId: { siteId: organization.sites[0].id, userId } },
-      update: { isActive: true },
-      create: { siteId: organization.sites[0].id, userId },
-    });
-    return organization.sites[0];
+    if (organizations.length === 1 && organizations[0].sites.length === 1) {
+      const organization = organizations[0];
+      await prisma.organizationMembership.upsert({
+        where: { organizationId_userId: { organizationId: organization.id, userId } },
+        update: { isActive: true, role: "INVENTORY" },
+        create: { organizationId: organization.id, userId, role: "INVENTORY" },
+      });
+      await prisma.siteMembership.upsert({
+        where: { siteId_userId: { siteId: organization.sites[0].id, userId } },
+        update: { isActive: true },
+        create: { siteId: organization.sites[0].id, userId },
+      });
+      return organization.sites[0];
+    }
+    if (organizations.length > 0) return null;
   }
 
   return prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`pilot-site:${userId}`}))`;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('continuixai-pilot-bootstrap'))`;
 
     const sitesAfterLock = await tx.site.findMany({
       where: {
@@ -88,6 +89,38 @@ export async function ensurePilotSiteForUser(userId: string, role?: string): Pro
       orderBy: { createdAt: "asc" },
       select: { organizationId: true },
     });
+
+    if (!membership && role !== "ADMIN") {
+      const organizationsAfterLock = await tx.organization.findMany({
+        where: { isActive: true },
+        take: 2,
+        orderBy: { createdAt: "asc" },
+        select: {
+          id: true,
+          sites: {
+            where: { isActive: true },
+            take: 1,
+            orderBy: [{ code: "asc" }, { id: "asc" }],
+            select: { id: true, organizationId: true, timeZone: true, name: true, code: true },
+          },
+        },
+      });
+      if (organizationsAfterLock.length === 1 && organizationsAfterLock[0].sites.length === 1) {
+        const organization = organizationsAfterLock[0];
+        await tx.organizationMembership.upsert({
+          where: { organizationId_userId: { organizationId: organization.id, userId } },
+          update: { isActive: true, role: "INVENTORY" },
+          create: { organizationId: organization.id, userId, role: "INVENTORY" },
+        });
+        await tx.siteMembership.upsert({
+          where: { siteId_userId: { siteId: organization.sites[0].id, userId } },
+          update: { isActive: true },
+          create: { siteId: organization.sites[0].id, userId },
+        });
+        return organization.sites[0];
+      }
+      if (organizationsAfterLock.length > 0) return null;
+    }
 
     if (!membership) {
       const organization = await tx.organization.create({

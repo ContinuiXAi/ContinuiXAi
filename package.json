@@ -14,18 +14,27 @@
     "prisma:generate": "npm run prisma:generate -w apps/api",
     "prisma:migrate": "npm run prisma:migrate -w apps/api",
     "seed": "npm run seed -w apps/api",
-    "test": "npm run build:shared && npm run test -w apps/api && npm run test -w apps/web",
+    "test:pwa-home": "node scripts/test-pwa-home-launcher.mjs",
+    "test": "npm run test:pwa-home && npm run build:shared && npm run test -w apps/api && npm run test -w apps/web",
     "lint": "npm run lint -w apps/api && npm run lint -w apps/web",
     "measure:zxing": "node scripts/measure-zxing-chunks.cjs"
   },
   "devDependencies": {
-    "playwright-core": "^1.62.1"
+    "playwright-core": "^1.62.1",
+    "prisma": "7.10.0"
   },
   "overrides": {
     "postcss": "^8.5.25",
-    "sharp": "^0.35.3",
+    "sharp": "0.35.4",
+    "js-yaml": "4.3.2",
     "eslint": "^9.39.5",
     "nanoid": "^3.3.18",
-    "deepmerge-ts": "^8.0.1"
+    "fast-uri": "4.1.4",
+    "prisma": {
+      "mysql2": "3.24.4"
+    },
+    "@prisma/config": {
+      "deepmerge-ts": "8.0.2"
+    }
   }
 }

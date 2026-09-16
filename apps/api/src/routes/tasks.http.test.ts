@@ -10,6 +10,8 @@ const mocks = vi.hoisted(() => ({
   assignmentCreate: vi.fn(),
   assignmentUpdateMany: vi.fn(),
   assignmentFindUniqueOrThrow: vi.fn(),
+  assignmentFindMany: vi.fn(),
+  countSessionFindMany: vi.fn(),
   eventCreate: vi.fn(),
   transaction: vi.fn(),
 }));
@@ -27,7 +29,9 @@ vi.mock("../lib/prisma.js", () => ({
       create: mocks.assignmentCreate,
       updateMany: mocks.assignmentUpdateMany,
       findUniqueOrThrow: mocks.assignmentFindUniqueOrThrow,
+      findMany: mocks.assignmentFindMany,
     },
+    storeCountSession: { findMany: mocks.countSessionFindMany },
     taskAssignmentEvent: { create: mocks.eventCreate },
     $transaction: mocks.transaction,
   },
@@ -55,6 +59,9 @@ describe("task route tenant and concurrency guards", () => {
       code: "A",
     });
     mocks.membershipFindUnique.mockResolvedValue({ role: "MEMBER", isActive: true });
+    mocks.membershipFindMany.mockResolvedValue([]);
+    mocks.assignmentFindMany.mockResolvedValue([]);
+    mocks.countSessionFindMany.mockResolvedValue([]);
     mocks.transaction.mockImplementation(async (fn: (tx: unknown) => unknown) => fn({
       taskAssignment: {
         create: mocks.assignmentCreate,
@@ -184,6 +191,39 @@ describe("task route tenant and concurrency guards", () => {
         }),
       }),
     }));
+    await app.close();
+  });
+
+  it("returns active count ownership and assignment history with manager team work", async () => {
+    mocks.membershipFindUnique.mockResolvedValue({ role: "MANAGER", isActive: true });
+    mocks.countSessionFindMany.mockResolvedValue([{
+      id: "count-a",
+      name: "Evening count",
+      assignedToId: "employee-a",
+      assignedTo: { id: "employee-a", name: "Alex", employeeNumber: "E-1" },
+      assignmentEvents: [{
+        id: "event-a",
+        fromUser: null,
+        toUser: { id: "employee-a", name: "Alex" },
+        assignedBy: { id: "manager", name: "Morgan" },
+        reason: null,
+        occurredAt: new Date("2026-09-16T12:00:00Z"),
+      }],
+    }]);
+    const app = await testApp();
+
+    const response = await app.inject({ method: "GET", url: "/api/tasks/team?start=2026-09-16&end=2026-09-16" });
+
+    expect(response.statusCode).toBe(200);
+    expect(mocks.countSessionFindMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { siteId: "site-a", status: "ACTIVE" },
+      select: expect.objectContaining({ assignedTo: expect.any(Object), assignmentEvents: expect.any(Object) }),
+    }));
+    expect(response.json().activeCounts).toMatchObject([{
+      id: "count-a",
+      assignedToId: "employee-a",
+      assignmentEvents: [{ toUser: { id: "employee-a", name: "Alex" } }],
+    }]);
     await app.close();
   });
 

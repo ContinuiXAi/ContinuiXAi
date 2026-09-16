@@ -123,6 +123,13 @@ export function removeFromCountQueue(id: string): void {
   saveCountQueue(getCountQueue().filter((entry) => entry.id !== id));
 }
 
+export function isDiscardableComponentParentScan(entry: QueuedCountScan): boolean {
+  const reason = entry.failureReason?.toLowerCase() ?? "";
+  return entry.status === "failed"
+    && reason.includes("display or mixed package")
+    && reason.includes("component products");
+}
+
 export function clearCountQueueForSession(sessionId: string, ownerUserId?: string): void {
   saveCountQueue(getCountQueue().filter((entry) => entry.sessionId !== sessionId || (ownerUserId && entry.ownerUserId !== ownerUserId)));
 }

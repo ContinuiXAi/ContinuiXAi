@@ -8,6 +8,7 @@ import { useAuth } from "../../lib/auth-context";
 import { useToast } from "../../lib/toast-context";
 import { countTaskActionLabel, greetingForTimeZone, groupAssignments, humanizeEnum, isCountTask } from "../../lib/taskPresentation";
 import type { MyWorkResponse, TaskAssignment, TaskStatus } from "../../lib/types";
+import { BrandLockup } from "../../components/BrandLockup";
 
 function formatSiteDate(date: string, timeZone: string): string {
   try {
@@ -69,12 +70,12 @@ function TaskCard({ task, today, timeZone, onUpdate }: {
         </div>
       )}
       {scanTask && !isCompleted && (
-        <Link href="/store-count" className="work-link-button">{countTaskActionLabel(task)}</Link>
+        <><Link href="/store-count" className="work-link-button">{countTaskActionLabel(task)}</Link><p className="work-task-instructions">Finish the active count in Count. Marking this task done only updates My Work.</p></>
       )}
       <div className="work-task-actions" aria-label={`Actions for ${task.title}`}>
         {isSkipped && <span className="work-complete-badge">Skipped</span>}
         {!isCompleted && !isSkipped && task.status === "OPEN" && <button type="button" className="secondary" disabled={saving} onClick={() => void update({ status: "IN_PROGRESS" })}>Start task</button>}
-        {!isCompleted && !isSkipped && <button type="button" disabled={saving} onClick={() => void update({ status: "COMPLETED" })}>Complete</button>}
+        {!isCompleted && !isSkipped && <button type="button" disabled={saving} onClick={() => void update({ status: "COMPLETED" })}>{scanTask ? "Mark task done" : "Complete"}</button>}
         {isCompleted && <span className="work-complete-badge">Completed</span>}
       </div>
       {!isSkipped && <>
@@ -156,7 +157,7 @@ export default function MyWorkPage() {
   return (
     <main className="container work-container">
       <header className="work-hero">
-        <div className="work-brand">Continuixai Ops</div>
+        <BrandLockup compact />
         {data ? (
           <>
             <h1>{greetingForTimeZone(user.name, new Date(), data.site.timeZone)}</h1>

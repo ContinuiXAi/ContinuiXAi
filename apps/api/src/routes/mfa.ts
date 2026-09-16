@@ -1,5 +1,4 @@
 import type { FastifyInstance } from "fastify";
-import QRCode from "qrcode";
 import { prisma } from "../lib/prisma.js";
 import { setMediaCookie } from "../lib/mediaAuth.js";
 import {
@@ -9,9 +8,9 @@ import {
   generateBackupCodes,
   generateTotpSecret,
   hashBackupCodes,
-  otpauthUri,
-  verifyTotp,
+  findTotpCounter,
 } from "../lib/mfa.js";
+import { createUserSession } from "../lib/sessionService.js";
 
 const JWT_EXPIRES_IN = "7d";
 type UserRole = "ADMIN" | "GENERAL";
@@ -33,13 +32,10 @@ async function loadChallengeUser(app: FastifyInstance, token: string, purpose: "
   return user;
 }
 
-function issueSession(app: FastifyInstance, user: { id: string; role: UserRole; tokenVersion: number }) {
-  return app.jwt.sign({ sub: user.id, role: user.role, tv: user.tokenVersion }, { expiresIn: JWT_EXPIRES_IN });
-}
-
-function sessionResponse(app: FastifyInstance, reply: Parameters<typeof setMediaCookie>[1], user: { id: string; name: string; email: string; employeeNumber: string | null; role: UserRole; tokenVersion: number }) {
-  const token = issueSession(app, user);
-  setMediaCookie(app, reply, user.id);
+async function sessionResponse(app: FastifyInstance, reply: Parameters<typeof setMediaCookie>[1], user: { id: string; name: string; email: string; employeeNumber: string | null; role: UserRole; tokenVersion: number }) {
+  const session = await createUserSession(user.id, user.tokenVersion);
+  const token = app.jwt.sign({ sub: user.id, role: user.role, tv: user.tokenVersion, sid: session.id }, { expiresIn: JWT_EXPIRES_IN });
+  setMediaCookie(app, reply, user.id, user.tokenVersion, session.id);
   return { token, user: { id: user.id, name: user.name, email: user.email, employeeNumber: user.employeeNumber, role: user.role, mfaEnabled: true } };
 }
 
@@ -49,6 +45,7 @@ export async function mfaRoutes(app: FastifyInstance) {
     if (!challengeToken) return reply.code(400).send({ error: "MFA setup token is required." });
     const user = await loadChallengeUser(app, challengeToken, "mfa-setup");
     if (!user) return reply.code(401).send({ error: "MFA setup session expired. Sign in again." });
+    if (user.mfaEnabled) return reply.code(409).send({ error: "Authenticator setup is already complete." });
 
     let secret: string;
     if (user.mfaSecretEncrypted) {
@@ -57,9 +54,7 @@ export async function mfaRoutes(app: FastifyInstance) {
       secret = generateTotpSecret();
     }
     await prisma.user.update({ where: { id: user.id }, data: { mfaSecretEncrypted: encryptSecret(secret), mfaEnabled: false } });
-    const uri = otpauthUri(secret, user.employeeNumber || user.email);
-    const qrDataUrl = await QRCode.toDataURL(uri, { width: 240, margin: 1 });
-    return { qrDataUrl, secret, account: user.employeeNumber || user.email };
+    return { secret, account: user.employeeNumber || user.email };
   });
 
   app.post("/mfa/confirm", { config: { rateLimit: { max: 10, timeWindow: "15 minutes" } } }, async (request, reply) => {
@@ -70,12 +65,15 @@ export async function mfaRoutes(app: FastifyInstance) {
 
     let secret: string;
     try { secret = decryptSecret(user.mfaSecretEncrypted); } catch { return reply.code(400).send({ error: "MFA setup must be restarted." }); }
-    if (!verifyTotp(secret, code)) return reply.code(401).send({ error: "That verification code is not correct." });
+    const counter = findTotpCounter(secret, code);
+    if (counter === null) return reply.code(401).send({ error: "That verification code is not correct." });
 
     const backupCodes = generateBackupCodes();
     const hashes = await hashBackupCodes(backupCodes);
-    const updated = await prisma.user.update({ where: { id: user.id }, data: { mfaEnabled: true, mfaBackupCodeHashes: hashes } });
-    return { ...sessionResponse(app, reply, updated), backupCodes };
+    const accepted = await prisma.user.updateMany({ where: { id: user.id, tokenVersion: user.tokenVersion, mfaEnabled: false }, data: { mfaEnabled: true, mfaBackupCodeHashes: hashes, mfaLastTotpCounter: counter, tokenVersion: { increment: 1 } } });
+    if (accepted.count !== 1) return reply.code(409).send({ error: "Authenticator setup was already completed. Sign in again." });
+    const updated = await prisma.user.findUniqueOrThrow({ where: { id: user.id } });
+    return { ...await sessionResponse(app, reply, updated), backupCodes };
   });
 
   app.post("/mfa/verify", { config: { rateLimit: { max: 10, timeWindow: "15 minutes" } } }, async (request, reply) => {
@@ -84,15 +82,20 @@ export async function mfaRoutes(app: FastifyInstance) {
     const user = await loadChallengeUser(app, challengeToken, "mfa-login");
     if (!user || !user.mfaEnabled || !user.mfaSecretEncrypted) return reply.code(401).send({ error: "MFA verification session expired. Sign in again." });
 
-    let totpValid = false;
-    try { totpValid = verifyTotp(decryptSecret(user.mfaSecretEncrypted), code); } catch { /* invalid encrypted secret */ }
-    if (totpValid) return sessionResponse(app, reply, user);
+    let counter: bigint | null = null;
+    try { counter = findTotpCounter(decryptSecret(user.mfaSecretEncrypted), code); } catch { /* invalid encrypted secret */ }
+    if (counter !== null) {
+      const accepted = await prisma.user.updateMany({ where: { id: user.id, OR: [{ mfaLastTotpCounter: null }, { mfaLastTotpCounter: { lt: counter } }] }, data: { mfaLastTotpCounter: counter } });
+      if (accepted.count !== 1) return reply.code(401).send({ error: "That verification code has already been used." });
+      return sessionResponse(app, reply, user);
+    }
 
     const hashes = Array.isArray(user.mfaBackupCodeHashes) ? user.mfaBackupCodeHashes.filter((v): v is string => typeof v === "string") : [];
     const backup = await consumeBackupCode(code, hashes);
     if (!backup.valid) return reply.code(401).send({ error: "That verification code is not correct." });
 
-    await prisma.user.update({ where: { id: user.id }, data: { mfaBackupCodeHashes: backup.remaining } });
+    const consumed = await prisma.user.updateMany({ where: { id: user.id, mfaBackupCodeHashes: { equals: hashes } }, data: { mfaBackupCodeHashes: backup.remaining } });
+    if (consumed.count !== 1) return reply.code(401).send({ error: "That backup code has already been used." });
     return sessionResponse(app, reply, user);
   });
 }

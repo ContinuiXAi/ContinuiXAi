@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { apiJson } from "../../lib/api";
 import { useAuth } from "../../lib/auth-context";
 import type { DailySummaryResponse } from "../../lib/types";
+import { BrandLockup } from "../../components/BrandLockup";
 
 export default function DailySummaryPage() {
   const router = useRouter();
@@ -33,7 +34,7 @@ export default function DailySummaryPage() {
   return (
     <main className="container work-container">
       <header className="work-hero compact">
-        <div className="work-brand">Continuixai Ops</div>
+        <BrandLockup compact />
         <h1>Here&apos;s what you accomplished today. Great job, {firstName}!</h1>
         {summary && <p>{summary.site.name || summary.site.code} · {summary.date}</p>}
       </header>

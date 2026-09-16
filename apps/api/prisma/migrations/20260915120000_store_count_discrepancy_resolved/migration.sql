@@ -1,0 +1,1 @@
+ALTER TYPE "StoreCountDiscrepancyStatus" ADD VALUE IF NOT EXISTS 'RESOLVED' AFTER 'OPEN';

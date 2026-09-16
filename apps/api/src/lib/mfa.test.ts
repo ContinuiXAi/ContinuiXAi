@@ -8,6 +8,7 @@ import {
   hashBackupCodes,
   verifyTotp,
   assertMfaEncryptionConfig,
+  findTotpCounter,
 } from "./mfa.js";
 
 describe("MFA helpers", () => {
@@ -26,6 +27,12 @@ describe("MFA helpers", () => {
     const rfcSecret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
     expect(verifyTotp(rfcSecret, "287082", 59_000)).toBe(true);
     expect(verifyTotp(rfcSecret, "000000", 59_000)).toBe(false);
+  });
+
+  it("returns the accepted time-step counter for replay prevention", () => {
+    const secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+    expect(findTotpCounter(secret, "287082", 59_000)).toBe(1n);
+    expect(findTotpCounter(secret, "000000", 59_000)).toBeNull();
   });
 
   it("makes backup codes single-use", async () => {
