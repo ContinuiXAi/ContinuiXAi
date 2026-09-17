@@ -192,6 +192,18 @@ async function main() {
     assert.equal((await prisma.storeCountEntry.findUniqueOrThrow({ where: { id: scanFirst.entry.id } })).quantity, 14);
     assert.equal((await cancel(scanFirst, b.id)).statusCode, 200);
 
+    // A scan that wins the session lock makes an already-open correction stale.
+    // Both are real HTTP requests on separate PostgreSQL connections.
+    const scanBeforeEdit = await count(await product());
+    const scanBeforeEditResults = await scheduled(scanBeforeEdit, [
+      () => scan(scanBeforeEdit),
+      () => edit(scanBeforeEdit, a.id, 12, 13),
+    ]);
+    assert.deepEqual(scanBeforeEditResults.map((r) => r.statusCode), [200, 409]);
+    assert.match(scanBeforeEditResults[1].json().error, /changed on another device/i);
+    assert.equal((await prisma.storeCountEntry.findUniqueOrThrow({ where: { id: scanBeforeEdit.entry.id } })).quantity, 14);
+    assert.equal((await cancel(scanBeforeEdit)).statusCode, 200);
+
     // Omitted product is not zero, even with a stale VERIFIED visit and reason.
     const evidence = await count(await product()); const missing = await product();
     await prisma.storeCountSession.update({ where: { id: evidence.session.id }, data: { routeSnapshot: [snapshot(evidence.item), snapshot(missing)] } });
@@ -268,7 +280,7 @@ async function main() {
     const cancelFirst = await count(await product()); const cancelToken = await reviewToken(cancelFirst);
     assert.deepEqual((await scheduled(cancelFirst, [() => cancel(cancelFirst), () => approve(cancelFirst, cancelToken)])).map((r) => r.statusCode), [200, 409]);
     assert.equal(await prisma.inventoryTransaction.count({ where: { referenceId: cancelFirst.discrepancy.id } }), 0);
-    console.log("Final inventory truth PostgreSQL validation passed: assigned discovery/handoff, frozen required zero evidence, recipe aliases/versions, all five authority revocations across scan/edit/verify/Finish/Cancel, and both cancellation/Finish/approval lock orders. Fixture evidence retained until disposable database teardown.");
+    console.log("Final inventory truth PostgreSQL validation passed: assigned discovery/handoff, real scan-versus-stale-edit conflict, frozen required zero evidence, recipe aliases/versions, all five authority revocations across scan/edit/verify/Finish/Cancel, and both cancellation/Finish/approval lock orders. Fixture evidence retained until disposable database teardown.");
   } finally { await app.close(); await holder.end(); await observer.end(); await prisma.$disconnect(); }
 }
 main().catch((error) => { console.error(error); process.exit(1); });
