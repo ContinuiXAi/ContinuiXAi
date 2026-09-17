@@ -46,7 +46,7 @@ async function main() {
     const otherSite = await prisma.site.create({ data: { organizationId: org.id, name: "History B", code: "B" } });
     const foreignSite = await prisma.site.create({ data: { organizationId: foreignOrg.id, name: "History foreign", code: "C" } });
     const sites = [site, otherSite, foreignSite];
-    const locations = await Promise.all(sites.map((s) => prisma.storeLocation.create({ data: { siteId: s.id, code: "FIXTURE", name: "Synthetic location" } })));
+    const locations = await Promise.all(sites.map((s) => prisma.storeLocation.create({ data: { siteId: s.id, code: `history-${suffix}-${s.id}`, name: "Synthetic location" } })));
     const user = await prisma.user.create({ data: { name: "History manager", email: `history-${suffix}@example.test`, passwordHash: "not-a-login", role: "ADMIN" } });
     const orgMembership = await prisma.organizationMembership.create({ data: { organizationId: org.id, userId: user.id, role: "MANAGER" } });
     const siteMembership = await prisma.siteMembership.create({ data: { siteId: site.id, userId: user.id } });
