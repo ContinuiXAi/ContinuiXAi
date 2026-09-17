@@ -79,8 +79,23 @@ export async function storeCountExportRoutes(app: FastifyInstance) {
     const role = request.user.role;
     if (!userId || !role) return reply.code(401).send({ error: "invalid authenticated user" });
 
-    const session = await prisma.storeCountSession.findUnique({
-      where: { id },
+    const session = await prisma.storeCountSession.findFirst({
+      where: {
+        id,
+        OR: [
+          {
+            site: {
+              isActive: true,
+              organization: {
+                isActive: true,
+                memberships: { some: { userId, isActive: true, user: { isActive: true } } },
+              },
+              memberships: { some: { userId, isActive: true } },
+            },
+          },
+          { siteId: null, startedById: userId, startedBy: { isActive: true } },
+        ],
+      },
       include: {
         startedBy: { select: { id: true, name: true, email: true } },
         site: { select: { id: true, code: true, name: true } },
@@ -95,15 +110,6 @@ export async function storeCountExportRoutes(app: FastifyInstance) {
     });
 
     if (!session) return reply.code(404).send({ error: "count session not found" });
-    if (session.siteId && role !== "ADMIN") {
-      const membership = await prisma.organizationMembership.findFirst({
-        where: { userId, isActive: true, organization: { sites: { some: { id: session.siteId, isActive: true } } } },
-        select: { id: true },
-      });
-      if (!membership) return reply.code(403).send({ error: "you do not have access to this count session" });
-    } else if (!session.siteId && session.startedById !== userId && role !== "ADMIN") {
-      return reply.code(403).send({ error: "you do not have access to this count session" });
-    }
 
     const csv = buildStoreCountCsv({ session, entries: session.entries });
     const safeName = (session.name || `count-${session.id}`).replace(/[^a-zA-Z0-9._-]+/g, "-");

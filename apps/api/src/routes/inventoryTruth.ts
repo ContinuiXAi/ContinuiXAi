@@ -29,6 +29,39 @@ const reassignSchema = z.object({
   reason: z.string().trim().max(500).optional(),
 }).strict();
 
+const stockStateQuerySchema = z.object({
+  cursor: z.string().trim().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+}).strict();
+
+type StockStateCursor = { name: string; id: string };
+
+function decodeStockStateCursor(cursor: string | undefined): StockStateCursor | null {
+  if (!cursor) return null;
+  try {
+    const decoded = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+    if (typeof decoded?.name !== "string" || !decoded.name || typeof decoded?.id !== "string" || !decoded.id) return null;
+    return { name: decoded.name, id: decoded.id };
+  } catch {
+    return null;
+  }
+}
+
+function encodeStockStateCursor(cursor: StockStateCursor) {
+  return Buffer.from(JSON.stringify(cursor)).toString("base64url");
+}
+
+function decimalString(quantity: unknown): string {
+  if (quantity === null || quantity === undefined) return "0.0000";
+  if (typeof quantity === "object" && quantity !== null && "toFixed" in quantity && typeof quantity.toFixed === "function") {
+    return quantity.toFixed(4);
+  }
+  const value = String(quantity);
+  if (!/^-?\d+(?:\.\d+)?$/.test(value)) throw new Error("invalid inventory ledger quantity");
+  const [whole, fraction = ""] = value.split(".");
+  return `${whole}.${fraction.padEnd(4, "0").slice(0, 4)}`;
+}
+
 type LockedCount = {
   id: string;
   siteId: string;
@@ -83,6 +116,84 @@ function isActiveAssigneeSiteConflict(error: unknown) {
 export async function inventoryTruthRoutes(app: FastifyInstance) {
   app.addHook("preHandler", app.authenticate);
   await inventoryTruthReviewRoutes(app);
+
+  app.get("/sites", async (request) => {
+    const userId = request.user.sub;
+    if (!userId) return [];
+    return prisma.site.findMany({
+      where: {
+        isActive: true,
+        memberships: { some: { userId, isActive: true, user: { isActive: true } } },
+        organization: { isActive: true, memberships: { some: { userId, isActive: true, user: { isActive: true } } } },
+      },
+      select: { id: true, code: true, name: true },
+      orderBy: [{ code: "asc" }, { id: "asc" }],
+    });
+  });
+
+  app.get("/sites/:siteId/stock-state", async (request, reply) => {
+    const userId = request.user.sub;
+    if (!userId) return reply.code(401).send({ error: "invalid authenticated user" });
+    const { siteId } = request.params as { siteId: string };
+    const parsed = stockStateQuerySchema.safeParse(request.query);
+    if (!parsed.success) return reply.code(400).send({ error: "cursor and limit must be valid" });
+    const cursor = decodeStockStateCursor(parsed.data.cursor);
+    if (parsed.data.cursor && !cursor) return reply.code(400).send({ error: "cursor is invalid" });
+
+    // Tenant access is explicit: a global ADMIN role does not replace an active
+    // user, organization membership, or site membership for the requested site.
+    const site = await prisma.site.findFirst({
+      where: {
+        id: siteId,
+        isActive: true,
+        memberships: { some: { userId, isActive: true, user: { isActive: true } } },
+        organization: { isActive: true, memberships: { some: { userId, isActive: true, user: { isActive: true } } } },
+      },
+      select: { id: true, organizationId: true },
+    });
+    if (!site) return reply.code(404).send({ error: "site not found" });
+
+    const products = await prisma.product.findMany({
+      where: {
+        organizationId: site.organizationId,
+        isActive: true,
+        ...(cursor ? {
+          OR: [
+            { name: { gt: cursor.name } },
+            { name: cursor.name, id: { gt: cursor.id } },
+          ],
+        } : {}),
+      },
+      select: { id: true, barcodeValue: true, name: true, manufacturer: true, packageSize: true },
+      orderBy: [{ name: "asc" }, { id: "asc" }],
+      take: parsed.data.limit + 1,
+    });
+    const page = products.slice(0, parsed.data.limit);
+    // One application-server creation-time cutoff for every row in this page.
+    // This is not a commit-time watermark: only rows visible to this read are
+    // included. Business occurredAt may be backdated and is deliberately unused.
+    const ledgerCreatedThrough = new Date();
+    const balances = page.length === 0 ? [] : await prisma.inventoryTransaction.groupBy({
+      by: ["productId"],
+      where: { organizationId: site.organizationId, siteId: site.id, productId: { in: page.map((product) => product.id) }, createdAt: { lte: ledgerCreatedThrough } },
+      _sum: { quantity: true },
+    });
+    const balanceByProductId = new Map(balances.map((balance) => [balance.productId, decimalString(balance._sum.quantity)]));
+    const asOf = ledgerCreatedThrough.toISOString();
+
+    return {
+      rows: page.map((product) => ({
+        product,
+        onHand: balanceByProductId.get(product.id) ?? "0.0000",
+        asOf,
+        committed: { status: "notTracked" as const },
+        incoming: { status: "notTracked" as const },
+      })),
+      nextCursor: products.length > parsed.data.limit
+        ? encodeStockStateCursor({ name: page.at(-1)!.name, id: page.at(-1)!.id })
+        : null,
+    };
+  });
 
   app.post("/products/:productId/location-hints", async (request, reply) => {
     const parsed = locationHintSchema.safeParse(request.body);

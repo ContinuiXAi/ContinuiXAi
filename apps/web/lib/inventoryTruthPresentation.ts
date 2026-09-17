@@ -38,3 +38,7 @@ export function shortageInstruction(missingUnits: number) {
 export function overageInstruction(extraUnits: number) {
   return `${extraUnits} extra units found. Confirm the product and location.`;
 }
+
+export function frozenCountExpectationNotice() {
+  return "Count's Expected in store is frozen at count start.";
+}

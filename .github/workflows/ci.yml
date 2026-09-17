@@ -130,6 +130,10 @@ jobs:
         run: npx tsx scripts/inventoryTruthReviewDbValidation.ts
       - name: Validate final count assignment evidence and cancellation races on PostgreSQL
         run: npx tsx scripts/inventoryTruthFinalDbValidation.ts
+      - name: Validate point-in-time inventory history on PostgreSQL
+        env:
+          INVENTORY_HISTORY_DB_VALIDATE: "1"
+        run: npx tsx scripts/inventoryHistoryDbValidation.ts
       - name: Validate role-based task scoping and recurrence idempotency
         run: npx tsx scripts/taskFoundationValidation.ts
       - name: Exercise atomic counting and idempotent retries on PostgreSQL

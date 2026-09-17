@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { encodeCsvRow, parseCsv, stripCsvFormulaGuard } from "./csv.js";
+import { decodeUtf8Csv, encodeCsvRow, parseCsv, stripCsvFormulaGuard } from "./csv.js";
 
 describe("encodeCsvRow", () => {
   it("joins plain fields with commas", () => {
@@ -20,6 +20,11 @@ describe("encodeCsvRow", () => {
 
   it("does not alter numeric negatives (price/quantity columns)", () => {
     expect(encodeCsvRow(["item", -5, 1.5])).toBe("item,-5,1.5\r\n");
+  });
+
+  it("quotes carriage returns and guards leading line feeds in spreadsheet cells", () => {
+    expect(encodeCsvRow(["text\r=cmd", "\n=cmd"])).toBe('"text\r=cmd","\'\n=cmd"\r\n');
+    expect(stripCsvFormulaGuard("'\n=cmd")).toBe("\n=cmd");
   });
 
   it("still quotes formula values that also contain commas", () => {
@@ -63,5 +68,20 @@ describe("parseCsv", () => {
     const [[name, notes]] = parseCsv(exported);
     expect(stripCsvFormulaGuard(name)).toBe("=HYPERLINK");
     expect(stripCsvFormulaGuard(notes)).toBe("ok");
+  });
+
+  it("rejects unterminated quoted fields", () => {
+    expect(() => parseCsv('name\n"unterminated')).toThrow(/unterminated/i);
+  });
+
+  it("rejects quotes that are not valid RFC4180 field boundaries", () => {
+    expect(() => parseCsv('name\nMilk"shake')).toThrow(/unexpected quote/i);
+    expect(() => parseCsv('name\n"Milk"shake')).toThrow(/after a closing quote/i);
+  });
+});
+
+describe("decodeUtf8Csv", () => {
+  it("rejects invalid UTF-8 bytes instead of replacing them", () => {
+    expect(() => decodeUtf8Csv(Buffer.from([0xc3, 0x28]))).toThrow();
   });
 });

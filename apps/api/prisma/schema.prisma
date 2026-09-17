@@ -729,6 +729,9 @@ model InventoryTransaction {
   actor        User?             @relation("InventoryTransactionActor", fields: [actorUserId], references: [id], onDelete: SetNull)
 
   @@index([organizationId, siteId, occurredAt])
+  // Provisional query-shaped order; confirm with inventoryHistoryDbValidation.ts
+  // on disposable PostgreSQL 17 before approval/deployment.
+  @@index([organizationId, siteId, productId, occurredAt, createdAt], map: "InventoryTransaction_history_idx")
   @@index([locationId, productId, occurredAt])
   @@index([productId, occurredAt])
   @@index([referenceType, referenceId])

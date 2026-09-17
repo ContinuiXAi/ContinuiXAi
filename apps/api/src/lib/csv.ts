@@ -2,10 +2,10 @@ function escapeCsvField(value: string): string {
   // Excel/Sheets가 =+-@ 및 탭/CR로 시작하는 값을 수식으로 실행하지 못하도록 선행 '를 붙인다.
   // 단순 따옴표 감싸기만으로는 Excel이 여전히 수식으로 해석한다.
   let safe = value;
-  if (/^[=+\-@\t\r]/.test(safe)) {
+  if (/^[=+\-@\t\r\n]/.test(safe)) {
     safe = `'${safe}`;
   }
-  if (/[",\n]/.test(safe)) {
+  if (/[",\r\n]/.test(safe)) {
     return `"${safe.replace(/"/g, '""')}"`;
   }
   return safe;
@@ -28,7 +28,7 @@ export function encodeCsvRow(fields: (string | number | null | undefined)[]): st
 // export 시 붙인 선행 ' 하나를 import에서 벗겨 라운드트립이 깨지지 않게 한다.
 // 원래 이름에 '가 있던 경우(의도적)와 구분할 수 없지만, formula injection 방어 부작용이라 허용한다.
 export function stripCsvFormulaGuard(value: string): string {
-  if (value.length >= 2 && value.startsWith("'") && /^[=+\-@\t\r]/.test(value.slice(1))) {
+  if (value.length >= 2 && value.startsWith("'") && /^[=+\-@\t\r\n]/.test(value.slice(1))) {
     return value.slice(1);
   }
   return value;
@@ -40,6 +40,7 @@ export function parseCsv(text: string): string[][] {
   let row: string[] = [];
   let field = "";
   let inQuotes = false;
+  let quoteClosed = false;
   let i = 0;
 
   while (i < text.length) {
@@ -52,6 +53,7 @@ export function parseCsv(text: string): string[][] {
           continue;
         }
         inQuotes = false;
+        quoteClosed = true;
         i++;
         continue;
       }
@@ -60,6 +62,7 @@ export function parseCsv(text: string): string[][] {
       continue;
     }
     if (ch === '"') {
+      if (field.length > 0 || quoteClosed) throw new Error("CSV has an unexpected quote in an unquoted field.");
       inQuotes = true;
       i++;
       continue;
@@ -67,6 +70,7 @@ export function parseCsv(text: string): string[][] {
     if (ch === ",") {
       row.push(field);
       field = "";
+      quoteClosed = false;
       i++;
       continue;
     }
@@ -79,15 +83,24 @@ export function parseCsv(text: string): string[][] {
       rows.push(row);
       row = [];
       field = "";
+      quoteClosed = false;
       i++;
       continue;
     }
+    if (quoteClosed) throw new Error("CSV has characters after a closing quote.");
     field += ch;
     i++;
   }
+  if (inQuotes) throw new Error("CSV contains an unterminated quoted field.");
   if (field.length > 0 || row.length > 0) {
     row.push(field);
     rows.push(row);
   }
   return rows.filter((r) => !(r.length === 1 && r[0].trim() === ""));
+}
+
+/** Decodes a CSV upload without silently replacing invalid UTF-8 bytes. */
+export function decodeUtf8Csv(input: Buffer | string): string {
+  if (typeof input === "string") return input.replace(/^\uFEFF/, "");
+  return new TextDecoder("utf-8", { fatal: true }).decode(input).replace(/^\uFEFF/, "");
 }
