@@ -1502,8 +1502,8 @@ describe("Store Count pending-item lifecycle", () => {
     await act(async () => button("Set total").click());
 
     expect(writes).toEqual([
-      { url: "/api/store-count/sessions/session-a/entries/entry-a", method: "PATCH", body: { quantity: 9 } },
-      { url: "/api/store-count/sessions/session-a/entries/entry-a", method: "PATCH", body: { quantity: 9 } },
+      { url: "/api/store-count/sessions/session-a/entries/entry-a", method: "PATCH", body: { quantity: 9, expectedQuantity: 4 } },
+      { url: "/api/store-count/sessions/session-a/entries/entry-a", method: "PATCH", body: { quantity: 9, expectedQuantity: 4 } },
     ]);
     expect(container.textContent).toContain("Vitamin B12");
     expect(container.textContent).toContain("9");
