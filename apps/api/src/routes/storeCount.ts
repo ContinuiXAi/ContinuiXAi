@@ -23,6 +23,7 @@ const scanSchema = z.object({
 
 const setQuantitySchema = z.object({
   quantity: z.number().int().min(0).max(999999),
+  expectedQuantity: z.number().int().min(0).max(999999),
 });
 
 type SessionRow = Awaited<ReturnType<typeof prisma.storeCountSession.findUnique>>;
@@ -722,6 +723,7 @@ export async function storeCountRoutes(app: FastifyInstance) {
         await lockCountLocation(tx, scope, entry.locationId);
         if (entry.productId) await lockCountProduct(tx, scope, entry.productId);
         await rejectApprovedProductWrite(tx, sessionId, entry.productId);
+        if (entry.quantity !== parsed.data.expectedQuantity) throw new Error("ENTRY_QUANTITY_CHANGED");
 
         return tx.storeCountEntry.update({
           where: { id: entryId },
@@ -737,6 +739,9 @@ export async function storeCountRoutes(app: FastifyInstance) {
       }
       if (error instanceof Error && error.message === "ENTRY_NOT_FOUND") {
         return reply.code(404).send({ error: "count entry not found" });
+      }
+      if (error instanceof Error && error.message === "ENTRY_QUANTITY_CHANGED") {
+        return reply.code(409).send({ error: "This count changed on another device. Reload the latest total before correcting it." });
       }
       if (error instanceof Error && error.message === "PRODUCT_BASELINE_APPROVED") {
         return reply.code(409).send({ error: "This product's baseline is approved. Start a new count to record a change." });
