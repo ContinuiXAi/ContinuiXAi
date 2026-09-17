@@ -64,7 +64,7 @@ async function main() {
   }
   type Count = Awaited<ReturnType<typeof count>>;
   const scan = (c: Count, actor = a.id, key = randomUUID(), barcodeValue = c.item.barcodeValue!, quantityDelta = 1) => send(actor, "POST", `/count/sessions/${c.session.id}/scan`, { barcodeValue, locationId: location.id, quantityDelta, clientScanId: key });
-  const edit = (c: Count, actor = a.id, quantity = 12) => send(actor, "PATCH", `/count/sessions/${c.session.id}/entries/${c.entry.id}`, { quantity, expectedQuantity: c.entry.quantity });
+  const edit = (c: Count, actor = a.id, quantity = 12, expectedQuantity = c.entry.quantity) => send(actor, "PATCH", `/count/sessions/${c.session.id}/entries/${c.entry.id}`, { quantity, expectedQuantity });
   const verify = (c: Count, actor = a.id) => send(actor, "POST", `/truth/counts/${c.session.id}/locations/${location.id}/verify`, { offlineQueueFlushed: true });
   const finish = (c: Count, actor = a.id) => send(actor, "POST", `/count/sessions/${c.session.id}/complete`);
   const cancel = (c: Count, actor = a.id) => send(actor, "POST", `/count/sessions/${c.session.id}/cancel`);
@@ -171,7 +171,7 @@ async function main() {
     const originalKey = randomUUID();
     assert.equal((await scan(owned, b.id, originalKey)).statusCode, 200);
     assert.equal((await scan(owned, b.id, originalKey)).statusCode, 200);
-    assert.equal((await edit(owned, b.id, 12)).statusCode, 200);
+    assert.equal((await edit(owned, b.id, 12, 14)).statusCode, 200);
     const edited = await prisma.storeCountEntry.findUniqueOrThrow({ where: { id: owned.entry.id } });
     assert.equal(edited.quantity, 12);
     assert.equal(edited.countedByUserId, b.id);
