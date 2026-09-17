@@ -850,7 +850,7 @@ export default function StoreCountPage() {
     try {
       const updated = await apiJson<CountEntry>(`/api/store-count/sessions/${activeSession.id}/entries/${entry.id}`, {
         method: "PATCH",
-        body: JSON.stringify({ quantity }),
+        body: JSON.stringify({ quantity, expectedQuantity: entry.quantity }),
       });
       if (contextVersion !== contextVersionRef.current || sessionRef.current?.id !== activeSession.id) return;
       setSession((current) => {
