@@ -129,7 +129,7 @@ async function main() {
     const zeroScan = await app.inject({ method: "POST", url: `/api/store-count/sessions/${sessionId}/scan`, headers: auth(adminToken), payload: { barcodeValue: barcodeZero, locationId: location.id, quantityDelta: 1, clientScanId: `route-zero-${suffix}` } });
     assert(zeroScan.statusCode === 200, `zero setup scan returned ${zeroScan.statusCode}: ${zeroScan.body}`);
     const zeroEntryId = parseJson<{ id: string }>(zeroScan.body).id;
-    const zeroPatch = await app.inject({ method: "PATCH", url: `/api/store-count/sessions/${sessionId}/entries/${zeroEntryId}`, headers: auth(adminToken), payload: { quantity: 0 } });
+    const zeroPatch = await app.inject({ method: "PATCH", url: `/api/store-count/sessions/${sessionId}/entries/${zeroEntryId}`, headers: auth(adminToken), payload: { quantity: 0, expectedQuantity: 1 } });
     assert(zeroPatch.statusCode === 200, `confirmed-zero PATCH returned ${zeroPatch.statusCode}: ${zeroPatch.body}`);
     const zeroEntry = await prisma.storeCountEntry.findUniqueOrThrow({ where: { id: zeroEntryId } });
     assert(zeroEntry.quantity === 0, `confirmed-zero entry stored quantity ${zeroEntry.quantity}, expected 0`);
