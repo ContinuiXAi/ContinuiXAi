@@ -46,7 +46,7 @@ async function inject(operation: string, who = "a", barcode = "component-upc") {
   await app.register(storeCountRoutes, { prefix: "/count" });
   await app.register(inventoryTruthRoutes, { prefix: "/truth" });
   const options = operation === "scan" ? { method: "POST" as const, url: "/count/sessions/session/scan", payload: { barcodeValue: barcode, locationId: "shelf", quantityDelta: 2, clientScanId: `scan-${who}-${barcode}` } }
-    : operation === "edit" ? { method: "PATCH" as const, url: "/count/sessions/session/entries/entry", payload: { quantity: 7 } }
+    : operation === "edit" ? { method: "PATCH" as const, url: "/count/sessions/session/entries/entry", payload: { quantity: 7, expectedQuantity: entries[0]?.quantity ?? 0 } }
       : operation === "verify" ? { method: "POST" as const, url: "/truth/counts/session/locations/shelf/verify", payload: { offlineQueueFlushed: true } }
         : operation === "active" ? { method: "GET" as const, url: "/count/sessions/active" }
           : operation === "start" ? { method: "POST" as const, url: "/count/sessions", payload: { siteId: "site" } }
@@ -312,6 +312,13 @@ describe("whole-branch count counterexamples", () => {
     mocks.beforeTransaction = () => { authorized = false; };
     expect((await inject(operation)).statusCode).toBe(404);
     expect(entries[0].quantity).toBe(4); expect(logs).toHaveLength(0); expect(session.status).toBe("ACTIVE");
+  });
+  it("rejects an absolute correction when a concurrent scan changed the quantity first", async () => {
+    mocks.beforeTransaction = () => { entries[0].quantity = 6; };
+    const response = await inject("edit");
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error).toMatch(/changed.*reload/i);
+    expect(entries[0].quantity).toBe(6);
   });
   it("blocks omitted product verification even with one positive observation, then accepts explicit zero", async () => {
     expect((await inject("verify")).statusCode).toBe(409); expect(verified).toBe(false);
