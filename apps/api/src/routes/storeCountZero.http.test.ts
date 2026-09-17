@@ -149,7 +149,7 @@ describe("Store Count confirmed-zero scan entry", () => {
     const response = await app.inject(operation === "scan" ? {
       method: "POST", url: "/api/store-count/sessions/session-a/scan",
       payload: { barcodeValue: "000000000009", locationId: "location-a", quantityDelta: 0, clientScanId: "new-zero-id" },
-    } : { method: "PATCH", url: "/api/store-count/sessions/session-a/entries/entry-zero", payload: { quantity: 7 } });
+    } : { method: "PATCH", url: "/api/store-count/sessions/session-a/entries/entry-zero", payload: { quantity: 7, expectedQuantity: 0 } });
     expect(response.statusCode).toBe(409);
     expect(response.json().error).toMatch(/approved/i);
     expect(mocks.entryUpdate).not.toHaveBeenCalled();
