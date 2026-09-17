@@ -1495,7 +1495,7 @@ describe("inventory truth HTTP routes", () => {
       app.inject({
         method: "PATCH",
         url: "/api/store-count/sessions/session-a/entries/entry-a",
-        payload: { quantity: 2 },
+        payload: { quantity: 2, expectedQuantity: 1 },
       }),
     ]);
 
