@@ -117,11 +117,11 @@ await app.register(inventoryTruthRoutes, { prefix: "/api/inventory-truth" });
 await app.register(storeCountExportRoutes, { prefix: "/api/store-count" });
 await app.register(taskRoutes, { prefix: "/api/tasks" });
 await app.register(siteMembershipRoutes, { prefix: "/api/site-memberships" });
-await app.register(attachmentRoutes, { prefix: "/api/attachments" });
-await app.register(mediaAttachmentRoutes, { prefix: "/api/attachments" });
 
 if (legacyInventoryFeaturesEnabled) {
   app.log.warn("ENABLE_LEGACY_INVENTORY_FEATURES=true: inherited non-pilot inventory features are enabled.");
+  await app.register(attachmentRoutes, { prefix: "/api/attachments" });
+  await app.register(mediaAttachmentRoutes, { prefix: "/api/attachments" });
   await app.register(locationRoutes, { prefix: "/api/locations" });
   await app.register(categoryRoutes, { prefix: "/api/categories" });
   await app.register(itemRoutes, { prefix: "/api/items" });
