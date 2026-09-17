@@ -865,6 +865,7 @@ export default function StoreCountPage() {
       show("Count total corrected.", "success");
     } catch (error) {
       show(error instanceof Error ? error.message : "Could not correct this total. Try again when connected.", "error");
+      if (error instanceof ApiError && error.status === 409) await refreshSession(activeSession.id);
     } finally {
       if (contextVersion === contextVersionRef.current) setCorrectionSaving(false);
     }
