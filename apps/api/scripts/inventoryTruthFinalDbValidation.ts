@@ -64,7 +64,7 @@ async function main() {
   }
   type Count = Awaited<ReturnType<typeof count>>;
   const scan = (c: Count, actor = a.id, key = randomUUID(), barcodeValue = c.item.barcodeValue!, quantityDelta = 1) => send(actor, "POST", `/count/sessions/${c.session.id}/scan`, { barcodeValue, locationId: location.id, quantityDelta, clientScanId: key });
-  const edit = (c: Count, actor = a.id, quantity = 12) => send(actor, "PATCH", `/count/sessions/${c.session.id}/entries/${c.entry.id}`, { quantity });
+  const edit = (c: Count, actor = a.id, quantity = 12) => send(actor, "PATCH", `/count/sessions/${c.session.id}/entries/${c.entry.id}`, { quantity, expectedQuantity: c.entry.quantity });
   const verify = (c: Count, actor = a.id) => send(actor, "POST", `/truth/counts/${c.session.id}/locations/${location.id}/verify`, { offlineQueueFlushed: true });
   const finish = (c: Count, actor = a.id) => send(actor, "POST", `/count/sessions/${c.session.id}/complete`);
   const cancel = (c: Count, actor = a.id) => send(actor, "POST", `/count/sessions/${c.session.id}/cancel`);
