@@ -1510,6 +1510,33 @@ describe("Store Count pending-item lifecycle", () => {
     expect(container.querySelector<HTMLInputElement>('input[aria-label="Correct total for Vitamin B12"]')).toBeNull();
   });
 
+  it("refreshes the current count after a stale correction conflict", async () => {
+    const countedProduct = product("product-a", "012345678905", "Vitamin B12");
+    const active = countSession("session-a");
+    active.entries = [entry("entry-a", countedProduct.barcodeValue, countedProduct)];
+    await renderPage(active);
+    const refreshed = { ...active, entries: [{ ...active.entries[0], quantity: 6 }] };
+    mocks.apiJson.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === "/api/store-count/sessions/session-a/entries/entry-a" && init?.method === "PATCH") {
+        throw new ApiError("This count changed on another device. Reload the latest total before correcting it.", 409);
+      }
+      if (url === "/api/store-count/sessions/session-a") return refreshed;
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    await act(async () => button("Correct total").click());
+    await changeInput(container.querySelector<HTMLInputElement>('input[aria-label="Correct total for Vitamin B12"]')!, "9");
+    await act(async () => button("Set total").click());
+    await act(async () => undefined);
+
+    expect(mocks.apiJson).toHaveBeenCalledWith("/api/store-count/sessions/session-a");
+    expect(mocks.show).toHaveBeenCalledWith(
+      "This count changed on another device. Reload the latest total before correcting it.",
+      "error",
+    );
+    expect(container.textContent).toContain("6");
+  });
+
   it("blocks absolute correction while a matching additive delta is queued or syncing", async () => {
     const countedProduct = product("product-a", "012345678905", "Vitamin B12");
     const active = countSession("session-a");
