@@ -1,5 +1,7 @@
 # Retail Count MVP — Pilot Acceptance Contract
 
+Physical-device acceptance is **NOT RUN**. Use the repository-tracked [physical pilot acceptance packet](PHYSICAL-PILOT-ACCEPTANCE.md) to record the controlled iPhone, Android, and keyboard-wedge scanner evidence; it replaces reliance on the external stale worksheet. Automated verification does not replace that hardware/manual acceptance.
+
 ## Objective
 Ship a focused retail inventory-counting application that can be piloted in a real store before expanding the broader operations platform.
 
