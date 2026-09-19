@@ -747,7 +747,12 @@ describe("inventory truth HTTP routes", () => {
     await app.close();
   });
 
-  it("does not let a global administrator bypass active site membership", async () => {
+  // ADMIN role users may create a session on any active site within an
+  // organization they belong to, without an individual per-site membership
+  // record (see resolveAuthorizedSite in storeCount.ts). Org-scoping itself
+  // is unconditional there — an ADMIN still cannot reach another org's
+  // sites — so this only asserts the site-membership subclause is skipped.
+  it("grants a global administrator access to an active site in their organization without requiring individual site membership", async () => {
     mocks.siteFindMany.mockImplementation(async (args: { where: Record<string, unknown> }) =>
       args.where.memberships ? [] : [activeSite],
     );
@@ -758,8 +763,8 @@ describe("inventory truth HTTP routes", () => {
       payload: { siteId: "site-a" },
     });
 
-    expect(response.statusCode).toBe(403);
-    expect(mocks.transaction).not.toHaveBeenCalled();
+    expect(response.statusCode).toBe(201);
+    expect(mocks.transactionSessionCreate).toHaveBeenCalled();
     await app.close();
   });
 

@@ -1121,7 +1121,7 @@ export default function StoreCountPage() {
           {session.name && <strong>{session.name}</strong>}
           {session.assignedTo && <span>{session.name ? " · " : ""}Assigned to {session.assignedTo.name ?? "current employee"}</span>}
         </div>}
-        {countRouteStatus === "legacy" && <section className="card" style={{ position: "sticky", top: 8, zIndex: 30, padding: 12, marginBottom: 12 }}>
+        {countRouteStatus === "legacy" && <section aria-live="polite" aria-label="Current count location" className="card" style={{ position: "sticky", top: 8, zIndex: 30, padding: 12, marginBottom: 12 }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
             <div style={{ minWidth: 0 }}>
               <div style={{ fontSize: 12, fontWeight: 800, opacity: 0.7 }}>Counting at</div>
@@ -1136,6 +1136,7 @@ export default function StoreCountPage() {
                 if (transitionInFlightRef.current || identifyingRef.current || pendingItemRef.current || quantitySubmittingRef.current) return;
                 setChangingLocation((open) => !open);
               }}
+              aria-label="Change location"
               style={{ flex: "none", margin: 0 }}
             >
               Change
@@ -1173,7 +1174,7 @@ export default function StoreCountPage() {
             setCountRouteStatus("loaded");
           }}>Review {location.code}</button>)}</section>}
           {countingContextReady && <>
-          {currentRouteLocation && <section aria-label="Current count context" className="card" style={{ position: "sticky", top: 0, zIndex: 30, padding: 12, background: "var(--background, #fff)", color: "var(--foreground, #111)" }}>
+          {currentRouteLocation && <section aria-live="polite" aria-label="Current count context" className="card" style={{ position: "sticky", top: 0, zIndex: 30, padding: 12, background: "var(--background, #fff)", color: "var(--foreground, #111)" }}>
             <strong>Counting at {currentLocationLabel}</strong>
             {pendingItem && <><div>{pendingItem.productName ?? pendingItem.barcodeValue} · {pendingItem.packageSize} · UPC {pendingItem.barcodeValue}</div><div>Expected in store: {selectedRouteProduct?.expectedStoreQty ?? "Not available"}</div><div>Suggested places to check — stock is not guaranteed there</div><div>{selectedRouteProduct?.suspectedLocations.map((location) => <span key={location.locationId} style={{ marginRight: 8 }}>{location.code} · {location.verified ? "Checked" : "Not checked"}</span>) ?? "No suggested locations available"}</div></>}
           </section>}

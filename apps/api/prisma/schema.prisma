@@ -11,6 +11,20 @@ enum UserRole {
   GENERAL
 }
 
+// Which supply-chain segment an organization operates as. Drives which
+// product modules/UI surface for that org (retailer, wholesaler, repacker,
+// ...) without forking the codebase per segment. Defaults to RETAILER:
+// the first module being built out (2026-09-19); existing/not-yet-set orgs
+// are single-site pilot orgs, for which RETAILER is the correct default.
+enum BusinessType {
+  RETAILER
+  WHOLESALER
+  DISTRIBUTOR
+  REPACKER
+  CO_OP
+  OTHER
+}
+
 enum OrganizationRole {
   OWNER
   ADMIN
@@ -260,12 +274,13 @@ model SecurityAuditEvent {
 }
 
 model Organization {
-  id        String   @id @default(cuid())
-  name      String
-  slug      String   @unique
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id           String       @id @default(cuid())
+  name         String
+  slug         String       @unique
+  businessType BusinessType @default(RETAILER)
+  isActive     Boolean      @default(true)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
 
   memberships           OrganizationMembership[]
   sites                 Site[]
@@ -663,15 +678,21 @@ model StoreCountSession {
 }
 
 model StoreCountEntry {
-  id              String   @id @default(cuid())
+  id              String    @id @default(cuid())
   sessionId       String
   productId       String?
   barcodeValue    String
   locationId      String
-  quantity        Int      @default(1)
+  quantity        Int       @default(1)
   countedByUserId String?
-  scannedAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  scannedAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  // Retailer module: optional use-by/expiration date captured for the units
+  // counted at this session/location/barcode. Nullable and scan-optional —
+  // most scans never set it, and re-scanning without a date must not erase
+  // a date recorded on an earlier scan (see the ON CONFLICT clause in the
+  // /sessions/:id/scan handler, which COALESCEs rather than overwrites).
+  expiresAt       DateTime?
 
   session   StoreCountSession   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   product   Product?            @relation(fields: [productId], references: [id], onDelete: SetNull)
@@ -685,6 +706,7 @@ model StoreCountEntry {
   @@index([productId])
   @@index([locationId])
   @@index([countedByUserId])
+  @@index([sessionId, expiresAt])
 }
 
 model StoreCountScanLog {

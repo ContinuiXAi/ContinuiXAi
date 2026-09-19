@@ -121,8 +121,8 @@ export default function RegisterPage() {
       <h1>Create a New Account</h1>
       <p>{BRAND_NAME} will automatically assign you a unique Employee Number.</p>
       <form onSubmit={submit} className="form">
-        <input type="text" autoComplete="name" placeholder="Full name" value={name} onChange={(e) => setName(e.target.value)} required />
-        <input type="email" inputMode="email" autoComplete="email" placeholder="Email address" value={email} onChange={(e) => setEmail(e.target.value)} required />
+        <input type="text" autoComplete="name" placeholder="Full name" aria-label="Full name" value={name} onChange={(e) => setName(e.target.value)} required />
+        <input type="email" inputMode="email" autoComplete="email" placeholder="Email address" aria-label="Email address" value={email} onChange={(e) => setEmail(e.target.value)} required />
 
         <div style={{ padding: "12px 14px", border: "1px solid #555", borderRadius: 8 }}>
           <strong>Password requirements</strong>
@@ -136,14 +136,14 @@ export default function RegisterPage() {
           </ul>
         </div>
 
-        <input type={showPasswords ? "text" : "password"} autoComplete="new-password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} minLength={10} required />
-        <input type={showPasswords ? "text" : "password"} autoComplete="new-password" placeholder="Confirm password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} minLength={10} required />
+        <input type={showPasswords ? "text" : "password"} autoComplete="new-password" placeholder="Password" aria-label="Password" value={password} onChange={(e) => setPassword(e.target.value)} minLength={10} required />
+        <input type={showPasswords ? "text" : "password"} autoComplete="new-password" placeholder="Confirm password" aria-label="Confirm password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} minLength={10} required />
         <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <input type="checkbox" checked={showPasswords} onChange={(e) => setShowPasswords(e.target.checked)} />
           Show password
         </label>
 
-        <input type="password" inputMode="numeric" autoComplete="off" placeholder="6-digit Recovery PIN" value={recoveryPin} onChange={(e) => setRecoveryPin(e.target.value.replace(/\D/g, "").slice(0, 6))} pattern="\d{6}" required />
+        <input type="password" inputMode="numeric" autoComplete="off" placeholder="6-digit Recovery PIN" aria-label="6-digit Recovery PIN" value={recoveryPin} onChange={(e) => setRecoveryPin(e.target.value.replace(/\D/g, "").slice(0, 6))} pattern="\d{6}" required />
         <p style={{ fontSize: 14 }}>Your Recovery PIN verifies you if you forget your Employee Number or password. Do not share it.</p>
         <button type="submit" disabled={loading}>{loading ? "Creating account..." : "Create Account"}</button>
         {error && <p className="error-text" role="alert" aria-live="polite">{error}</p>}

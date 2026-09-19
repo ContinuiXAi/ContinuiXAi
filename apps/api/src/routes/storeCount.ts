@@ -19,6 +19,19 @@ const scanSchema = z.object({
   locationId: z.string().trim().min(1),
   quantityDelta: z.number().int().min(0).max(999).default(1),
   clientScanId: z.string().trim().min(1).max(160).optional(),
+  // Retailer module: optional use-by/expiration date for the units just
+  // scanned. Coerced from an ISO date/datetime string; omit (or send null)
+  // to leave any previously recorded date on this entry untouched (see the
+  // scan handler). null is normalized to undefined first — z.coerce.date()
+  // on its own would otherwise turn a literal null into new Date(null),
+  // i.e. the Unix epoch, which is a valid-looking but wrong date.
+  expiresAt: z.preprocess((value) => (value === null ? undefined : value), z.coerce.date().optional()),
+});
+
+const EXPIRING_SOON_DEFAULT_DAYS = 14;
+const EXPIRING_SOON_MAX_DAYS = 90;
+const expiringQuerySchema = z.object({
+  withinDays: z.coerce.number().int().min(1).max(EXPIRING_SOON_MAX_DAYS).default(EXPIRING_SOON_DEFAULT_DAYS),
 });
 
 const setQuantitySchema = z.object({
@@ -268,7 +281,10 @@ async function resolveAuthorizedSite(userId: string, requestedSiteId?: string, r
         isActive: true,
         memberships: { some: { userId, isActive: true } },
       },
-      memberships: { some: { userId, isActive: true } },
+      // ADMIN role users may access every site within an organization they
+      // belong to, without needing an individual per-site membership record.
+      // Still strictly org-scoped above: an ADMIN cannot see another org's sites.
+      ...(role === "ADMIN" ? {} : { memberships: { some: { userId, isActive: true } } }),
       ...(requestedSiteId ? { id: requestedSiteId } : {}),
     },
     orderBy: [{ code: "asc" }, { id: "asc" }],
@@ -589,7 +605,7 @@ export async function storeCountRoutes(app: FastifyInstance) {
     });
     if (!countSite) return reply.code(409).send({ error: "count site no longer exists" });
 
-    const { barcodeValue, locationId, quantityDelta, clientScanId } = parsed.data;
+    const { barcodeValue, locationId, quantityDelta, clientScanId, expiresAt } = parsed.data;
     const location = await prisma.storeLocation.findUnique({ where: { id: locationId } });
     if (!location) return reply.code(400).send({ error: "unknown locationId" });
     if (!location.isActive) return reply.code(400).send({ error: "this location is inactive" });
@@ -648,16 +664,17 @@ export async function storeCountRoutes(app: FastifyInstance) {
         const now = new Date();
         const rows = await tx.$queryRaw<Array<{ id: string }>>`
           INSERT INTO "StoreCountEntry"
-            ("id", "sessionId", "productId", "barcodeValue", "locationId", "quantity", "countedByUserId", "scannedAt", "updatedAt")
+            ("id", "sessionId", "productId", "barcodeValue", "locationId", "quantity", "countedByUserId", "scannedAt", "updatedAt", "expiresAt")
           VALUES
-            (${randomUUID()}, ${id}, ${product?.id ?? null}, ${barcodeValue}, ${locationId}, ${quantityDelta}, ${userId}, ${now}, ${now})
+            (${randomUUID()}, ${id}, ${product?.id ?? null}, ${barcodeValue}, ${locationId}, ${quantityDelta}, ${userId}, ${now}, ${now}, ${expiresAt ?? null})
           ON CONFLICT ("sessionId", "locationId", "barcodeValue")
           DO UPDATE SET
             "quantity" = "StoreCountEntry"."quantity" + EXCLUDED."quantity",
             "productId" = COALESCE(EXCLUDED."productId", "StoreCountEntry"."productId"),
             "countedByUserId" = EXCLUDED."countedByUserId",
             "scannedAt" = EXCLUDED."scannedAt",
-            "updatedAt" = EXCLUDED."updatedAt"
+            "updatedAt" = EXCLUDED."updatedAt",
+            "expiresAt" = COALESCE(EXCLUDED."expiresAt", "StoreCountEntry"."expiresAt")
           RETURNING "id"
         `;
         const countedId = rows[0]?.id;
@@ -780,6 +797,56 @@ export async function storeCountRoutes(app: FastifyInstance) {
       totalUnits,
       locations,
       rows,
+    };
+  });
+
+  // Retailer module: rotation/markdown alert. Surfaces entries in this
+  // session whose recorded expiresAt falls within the given window, soonest
+  // first, so a counter/manager knows what to pull or mark down before it
+  // goes stale (Walmart's item-level-RFID rotation-alert idea, built here on
+  // the barcode-scan + count-entry infrastructure that already exists).
+  app.get("/sessions/:id/expiring", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const userId = request.user.sub;
+    const role = request.user.role;
+    if (!userId || !role) return reply.code(401).send({ error: "invalid authenticated user" });
+    const access = await assertSessionAccess(id, userId, role);
+    if (!access.ok) return reply.code(access.code).send({ error: access.error });
+
+    const parsedQuery = expiringQuerySchema.safeParse(request.query);
+    if (!parsedQuery.success) return reply.code(400).send({ error: parsedQuery.error.flatten() });
+    const { withinDays } = parsedQuery.data;
+
+    const now = new Date();
+    const horizon = new Date(now.getTime() + withinDays * 24 * 60 * 60 * 1000);
+
+    const entries = await prisma.storeCountEntry.findMany({
+      where: {
+        sessionId: id,
+        expiresAt: { not: null, lte: horizon },
+      },
+      orderBy: { expiresAt: "asc" },
+      include: {
+        product: { select: { id: true, name: true, packageSize: true } },
+        location: { select: { id: true, code: true, name: true } },
+      },
+    });
+
+    return {
+      withinDays,
+      asOf: now,
+      rows: entries.map((entry) => ({
+        entryId: entry.id,
+        barcodeValue: entry.barcodeValue,
+        productId: entry.productId,
+        productName: entry.product?.name ?? null,
+        packageSize: entry.product?.packageSize ?? null,
+        locationId: entry.locationId,
+        locationCode: entry.location.code,
+        quantity: entry.quantity,
+        expiresAt: entry.expiresAt,
+        isAlreadyExpired: entry.expiresAt !== null && entry.expiresAt.getTime() < now.getTime(),
+      })),
     };
   });
 

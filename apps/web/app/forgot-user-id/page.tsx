@@ -38,12 +38,12 @@ export default function ForgotUserIdPage() {
       <h1>Forgot User ID?</h1>
       <p>Verify your identity with your email address and 6-digit Recovery PIN.</p>
       <form onSubmit={submit} className="form">
-        <input type="email" inputMode="email" autoComplete="email" placeholder="Email address" value={email} onChange={(e) => setEmail(e.target.value)} required />
-        <input type="password" inputMode="numeric" autoComplete="off" placeholder="6-digit Recovery PIN" value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 6))} pattern="\d{6}" required />
+        <input type="email" inputMode="email" autoComplete="email" placeholder="Email address" aria-label="Email address" value={email} onChange={(e) => setEmail(e.target.value)} required />
+        <input type="password" inputMode="numeric" autoComplete="off" placeholder="6-digit Recovery PIN" aria-label="6-digit Recovery PIN" value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 6))} pattern="\d{6}" required />
         <button type="submit" disabled={loading}>{loading ? "Verifying..." : "Recover Employee Number"}</button>
       </form>
-      {employeeNumber && <p><strong>Your Employee Number: {employeeNumber}</strong></p>}
-      {error && <p className="error-text">{error}</p>}
+      {employeeNumber && <p role="status" aria-live="polite"><strong>Your Employee Number: {employeeNumber}</strong></p>}
+      {error && <p className="error-text" role="alert" aria-live="polite">{error}</p>}
       <p><Link href="/login">Back to Sign In</Link> · <Link href="/help">Need Help?</Link></p>
     </main>
   );

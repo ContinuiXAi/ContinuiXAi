@@ -57,21 +57,21 @@ export default function ForgotPasswordPage() {
       <h1>Forgot Password?</h1>
       <p>Verify your identity with your email or Employee Number and your 6-digit Recovery PIN.</p>
       <form onSubmit={submit} className="form">
-        <input type="text" autoCapitalize="none" autoComplete="username" placeholder="Email or Employee Number" value={identifier} onChange={(e) => setIdentifier(e.target.value)} required />
-        <input type="password" inputMode="numeric" autoComplete="off" placeholder="6-digit Recovery PIN" value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 6))} pattern="\d{6}" required />
+        <input type="text" autoCapitalize="none" autoComplete="username" placeholder="Email or Employee Number" aria-label="Email or Employee Number" value={identifier} onChange={(e) => setIdentifier(e.target.value)} required />
+        <input type="password" inputMode="numeric" autoComplete="off" placeholder="6-digit Recovery PIN" aria-label="6-digit Recovery PIN" value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 6))} pattern="\d{6}" required />
         <div style={{ padding: "12px 14px", border: "1px solid #555", borderRadius: 8 }}>
           <strong>New password requirements</strong>
           <ul style={{ margin: "8px 0 0", paddingLeft: 22, lineHeight: 1.6 }}>
             <li>At least 10 characters</li><li>Must not start with a number</li><li>At least one uppercase letter (A-Z)</li><li>At least one lowercase letter (a-z)</li><li>At least one number (0-9)</li><li>At least one special character: ! @ # $ % ^ &amp; *</li>
           </ul>
         </div>
-        <input type={showPasswords ? "text" : "password"} autoComplete="new-password" placeholder="New password" value={password} onChange={(e) => setPassword(e.target.value)} minLength={10} required />
-        <input type={showPasswords ? "text" : "password"} autoComplete="new-password" placeholder="Confirm new password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} minLength={10} required />
+        <input type={showPasswords ? "text" : "password"} autoComplete="new-password" placeholder="New password" aria-label="New password" value={password} onChange={(e) => setPassword(e.target.value)} minLength={10} required />
+        <input type={showPasswords ? "text" : "password"} autoComplete="new-password" placeholder="Confirm new password" aria-label="Confirm new password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} minLength={10} required />
         <label style={{ display: "flex", alignItems: "center", gap: 8 }}><input type="checkbox" checked={showPasswords} onChange={(e) => setShowPasswords(e.target.checked)} />Show password</label>
         <button type="submit" disabled={loading}>{loading ? "Changing password..." : "Verify & Change Password"}</button>
       </form>
-      {message && <p><strong>{message}</strong></p>}
-      {error && <p className="error-text">{error}</p>}
+      {message && <p role="status" aria-live="polite"><strong>{message}</strong></p>}
+      {error && <p className="error-text" role="alert" aria-live="polite">{error}</p>}
       <p><Link href="/login">Back to Sign In</Link> · <Link href="/help">Need Help?</Link></p>
     </main>
   );
