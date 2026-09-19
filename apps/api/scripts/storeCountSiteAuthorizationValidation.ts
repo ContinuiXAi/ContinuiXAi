@@ -92,6 +92,13 @@ async function main() {
     });
     assert(adminRead.statusCode === 200, `organization ADMIN could not read the Count after creation: ${adminRead.statusCode} ${adminRead.body}`);
 
+    const adminCancel = await app.inject({
+      method: "POST",
+      url: `/api/store-count/sessions/${adminSession.id}/cancel`,
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    assert(adminCancel.statusCode === 200, `organization ADMIN could not cancel its own Count without SiteMembership: ${adminCancel.statusCode} ${adminCancel.body}`);
+
     console.log("Store Count site authorization validation passed: GENERAL access remains site-scoped and ADMIN access is organization-wide.");
   } finally {
     if (organizationId) {
