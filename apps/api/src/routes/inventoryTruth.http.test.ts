@@ -781,6 +781,34 @@ describe("inventory truth HTTP routes", () => {
     await app.close();
   });
 
+  it("revalidates an ADMIN writer against active organization access without requiring site membership", async () => {
+    mocks.sessionFindFirst.mockResolvedValue(createdSession);
+    mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const sql = normalizedSql(strings);
+      if (sql.includes('actor."role" = \'ADMIN\'')) {
+        return [{ ...lockedCount, organizationRole: "ADMIN" }];
+      }
+      if (locksExactSession(strings, values, "session-a")) return [{ status: "ACTIVE" }];
+      return [];
+    });
+    const app = await testApp("ADMIN");
+
+    const response = await app.inject({ method: "POST", url: "/api/store-count/sessions/session-a/cancel" });
+
+    expect(response.statusCode).toBe(200);
+    const authorizationSql = mocks.transactionQueryRaw.mock.calls
+      .map(([strings]) => normalizedSql(strings as TemplateStringsArray))
+      .find((sql) => sql.includes('actor."role" = \'ADMIN\''));
+    expect(authorizationSql).toBeDefined();
+    expect(authorizationSql).not.toContain('"SiteMembership"');
+    expect(authorizationSql).toContain('organization_membership."isActive" = TRUE');
+    expect(mocks.transactionSessionUpdate).toHaveBeenCalledWith({
+      where: { id: "session-a", siteId: "site-a", status: "ACTIVE" },
+      data: { status: "CANCELLED", completedAt: expect.any(Date) },
+    });
+    await app.close();
+  });
+
   it("verifies a required location once with the authenticated actor and time after the offline queue is flushed", async () => {
     mocks.transactionQueryRaw.mockResolvedValue([lockedVisit]);
     mocks.transactionVisitCount.mockResolvedValue(1);

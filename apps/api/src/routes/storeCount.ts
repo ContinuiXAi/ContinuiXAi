@@ -649,7 +649,7 @@ export async function storeCountRoutes(app: FastifyInstance) {
 
     try {
       const result = await prisma.$transaction(async (tx) => {
-        const scope = await requireCountWriter(tx, id, userId);
+        const scope = await requireCountWriter(tx, id, userId, role);
         await lockCountLocation(tx, scope, locationId);
 
         if (clientScanId) {
@@ -750,7 +750,7 @@ export async function storeCountRoutes(app: FastifyInstance) {
 
     try {
       return await prisma.$transaction(async (tx) => {
-        const scope = await requireCountWriter(tx, sessionId, userId);
+        const scope = await requireCountWriter(tx, sessionId, userId, role);
 
         const entry = await tx.storeCountEntry.findFirst({ where: { id: entryId, sessionId, location: { siteId: scope.siteId }, OR: [{ productId: null }, { product: { organizationId: scope.organizationId } }] } });
         if (!entry) throw new Error("ENTRY_NOT_FOUND");
@@ -913,7 +913,7 @@ export async function storeCountRoutes(app: FastifyInstance) {
     }
 
     const result = await prisma.$transaction(async (tx) => {
-      const locked = await lockCountScope(tx, id, userId);
+      const locked = await lockCountScope(tx, id, userId, role);
       if (!locked) return { status: "not-found" as const };
       if (locked.status !== "ACTIVE") return { status: "not-active" as const };
       if (!isCurrentCountAssignee(locked, userId)) return { status: "forbidden" as const };
@@ -1011,7 +1011,7 @@ export async function storeCountRoutes(app: FastifyInstance) {
 
     try {
       return await prisma.$transaction(async (tx) => {
-        const scope = await requireCountWriter(tx, id, userId);
+        const scope = await requireCountWriter(tx, id, userId, role);
         const approvals = await tx.storeCountDiscrepancy.count({ where: { sessionId: id, status: "APPROVED" } });
         if (approvals > 0) return reply.code(409).send({ error: "This count has approved adjustments and cannot be cancelled. Complete its remaining work." });
         return tx.storeCountSession.update({ where: { id, siteId: scope.siteId, status: "ACTIVE" }, data: { status: "CANCELLED", completedAt: new Date() } });

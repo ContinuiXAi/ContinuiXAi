@@ -22,28 +22,44 @@ export function assignedCountWhere(userId: string) {
 // Take the session lock BEFORE reading authorization. A request admitted before
 // reassignment/revocation may wait here; the next statement must see fresh state.
 // SHARE locks keep authority stable until commit without serializing all counts.
-export async function lockCountScope(tx: Prisma.TransactionClient, sessionId: string, userId: string) {
+export async function lockCountScope(tx: Prisma.TransactionClient, sessionId: string, userId: string, role?: string) {
   await tx.$queryRaw`SELECT "status" FROM "StoreCountSession" WHERE "id" = ${sessionId} FOR UPDATE`;
-  const rows = await tx.$queryRaw<CountScope[]>`
-    SELECT session."id", session."siteId", site."organizationId", session."status", session."startedAt",
-      session."startedById", session."assignedToId", organization_membership."role" AS "organizationRole"
-    FROM "StoreCountSession" AS session
-    INNER JOIN "Site" AS site ON site."id" = session."siteId"
-    INNER JOIN "Organization" AS organization ON organization."id" = site."organizationId"
-    INNER JOIN "SiteMembership" AS site_membership ON site_membership."siteId" = site."id"
-    INNER JOIN "OrganizationMembership" AS organization_membership ON organization_membership."organizationId" = organization."id"
-    INNER JOIN "User" AS actor ON actor."id" = organization_membership."userId"
-    WHERE session."id" = ${sessionId}
-      AND site_membership."userId" = ${userId} AND organization_membership."userId" = ${userId}
-      AND site_membership."isActive" = TRUE AND organization_membership."isActive" = TRUE
-      AND site."isActive" = TRUE AND organization."isActive" = TRUE AND actor."isActive" = TRUE
-    FOR SHARE OF site_membership, organization_membership, site, organization, actor
-  `;
+  const rows = role === "ADMIN"
+    ? await tx.$queryRaw<CountScope[]>`
+        SELECT session."id", session."siteId", site."organizationId", session."status", session."startedAt",
+          session."startedById", session."assignedToId", organization_membership."role" AS "organizationRole"
+        FROM "StoreCountSession" AS session
+        INNER JOIN "Site" AS site ON site."id" = session."siteId"
+        INNER JOIN "Organization" AS organization ON organization."id" = site."organizationId"
+        INNER JOIN "OrganizationMembership" AS organization_membership ON organization_membership."organizationId" = organization."id"
+        INNER JOIN "User" AS actor ON actor."id" = organization_membership."userId"
+        WHERE session."id" = ${sessionId}
+          AND organization_membership."userId" = ${userId}
+          AND organization_membership."isActive" = TRUE
+          AND site."isActive" = TRUE AND organization."isActive" = TRUE
+          AND actor."isActive" = TRUE AND actor."role" = 'ADMIN'
+        FOR SHARE OF organization_membership, site, organization, actor
+      `
+    : await tx.$queryRaw<CountScope[]>`
+        SELECT session."id", session."siteId", site."organizationId", session."status", session."startedAt",
+          session."startedById", session."assignedToId", organization_membership."role" AS "organizationRole"
+        FROM "StoreCountSession" AS session
+        INNER JOIN "Site" AS site ON site."id" = session."siteId"
+        INNER JOIN "Organization" AS organization ON organization."id" = site."organizationId"
+        INNER JOIN "SiteMembership" AS site_membership ON site_membership."siteId" = site."id"
+        INNER JOIN "OrganizationMembership" AS organization_membership ON organization_membership."organizationId" = organization."id"
+        INNER JOIN "User" AS actor ON actor."id" = organization_membership."userId"
+        WHERE session."id" = ${sessionId}
+          AND site_membership."userId" = ${userId} AND organization_membership."userId" = ${userId}
+          AND site_membership."isActive" = TRUE AND organization_membership."isActive" = TRUE
+          AND site."isActive" = TRUE AND organization."isActive" = TRUE AND actor."isActive" = TRUE
+        FOR SHARE OF site_membership, organization_membership, site, organization, actor
+      `;
   return rows[0] ?? null;
 }
 
-export async function requireCountWriter(tx: Prisma.TransactionClient, sessionId: string, userId: string) {
-  const scope = await lockCountScope(tx, sessionId, userId);
+export async function requireCountWriter(tx: Prisma.TransactionClient, sessionId: string, userId: string, role?: string) {
+  const scope = await lockCountScope(tx, sessionId, userId, role);
   if (!scope) throw new Error("COUNT_ACCESS_REVOKED");
   if (!isCurrentCountAssignee(scope, userId)) throw new Error("COUNT_NOT_ASSIGNED");
   if (scope.status !== "ACTIVE") throw new Error("SESSION_NOT_ACTIVE");
