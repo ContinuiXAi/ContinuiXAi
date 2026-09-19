@@ -17,16 +17,17 @@ let failUpdate: boolean;
 let inactivePredicate: string | null;
 let discrepancyOrganization: string;
 let missingObservation: boolean;
+let siteMembership: boolean;
 
-async function appFor(userId = "employee") {
+async function appFor(userId = "employee", role = "GENERAL") {
   const app = Fastify();
-  app.decorate("authenticate", async (req) => { Object.assign(req, { user: { sub: userId, role: "ADMIN", tv: 0 } }); });
+  app.decorate("authenticate", async (req) => { Object.assign(req, { user: { sub: userId, role, tv: 0 } }); });
   await app.register(inventoryTruthRoutes, { prefix: "/api/inventory-truth" });
   return app;
 }
 const root = "/api/inventory-truth/counts/count";
-async function request(method: "GET" | "PATCH" | "POST", path: string, payload?: object, user = "employee") {
-  const app = await appFor(user);
+async function request(method: "GET" | "PATCH" | "POST", path: string, payload?: object, user = "employee", role = "GENERAL") {
+  const app = await appFor(user, role);
   try { return await app.inject({ method, url: root + path, payload }); } finally { await app.close(); }
 }
 async function token() {
@@ -40,7 +41,7 @@ describe("inventory truth explanation and approval", () => {
     session = { id: "count", siteId: "site", organizationId: "org", status: "ACTIVE", assignedToId: "employee", organizationRole: "MANAGER" };
     discrepancy = { id: "difference", sessionId: "count", productId: "product", expectedStoreQty: 15, actualStoreQty: 13, difference: -2, status: "OPEN", reason: "COULD_NOT_FIND", note: "Checked every location", explainedById: "employee", explainedAt: new Date("2026-09-15T00:00:00Z"), reviewedById: null, reviewedAt: null, product: { name: "B12", barcodeValue: "0123", packageSize: "60 tablets" } };
     ledger = []; events = []; authorized = true; unverified = 0; actual = 13; failUpdate = false;
-    inactivePredicate = null; discrepancyOrganization = "org"; missingObservation = false;
+    inactivePredicate = null; discrepancyOrganization = "org"; missingObservation = false; siteMembership = true;
     // This is a lock-sensitive transactional in-memory double, not PostgreSQL evidence.
     let tail = Promise.resolve();
     mock.transaction.mockImplementation(async (work: (tx: unknown) => Promise<unknown>) => {
@@ -60,6 +61,10 @@ describe("inventory truth explanation and approval", () => {
             return [session];
           }
           if (sql.includes('FROM "StoreCountSession"')) {
+            if (!siteMembership && sql.includes('"SiteMembership"')) return [];
+            if (!siteMembership && sql.includes('actor."role" = \'ADMIN\'')) {
+              return authorized ? [{ ...session, startedAt: new Date("2026-09-15T00:00:00Z") }] : [];
+            }
             if (inactivePredicate && sql.includes(inactivePredicate)) return [];
             for (const required of ['site."id" = session."siteId"', 'organization."id" = site."organizationId"', 'site_membership."siteId" = site."id"', 'organization_membership."organizationId" = organization."id"', 'site_membership."isActive" = TRUE', 'organization_membership."isActive" = TRUE', 'site."isActive" = TRUE', 'organization."isActive" = TRUE', 'site_membership."userId" =', 'organization_membership."userId" =']) {
               if (!sql.includes(required)) return [];
@@ -146,6 +151,12 @@ describe("inventory truth explanation and approval", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({ canExplain: true, canApprove: true, sessionStatus: "ACTIVE", finalized: true, discrepancies: [{ expectedStoreQty: 15, actualStoreQty: 13, difference: -2, countedLocations: [{ code: "A1", quantity: 8 }, { code: "BACK", quantity: 5 }] }] });
     expect(response.body).not.toContain("expectedLocationQty");
+  });
+  it("lets an active ADMIN organization member review a Count without site membership", async () => {
+    siteMembership = false;
+    const response = await request("GET", "/review", undefined, "employee", "ADMIN");
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ sessionId: "count", canExplain: true, canApprove: true });
   });
   it("refreshes active discrepancy totals under the review lock after a recount", async () => {
     actual = 12;

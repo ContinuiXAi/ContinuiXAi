@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { encodeCsvRow } from "../lib/csv.js";
 import { prisma } from "../lib/prisma.js";
+import { countSiteAccessWhere } from "../lib/storeCountWriteAccess.js";
 
 export type StoreCountExportEntry = {
   barcodeValue: string;
@@ -84,14 +85,7 @@ export async function storeCountExportRoutes(app: FastifyInstance) {
         id,
         OR: [
           {
-            site: {
-              isActive: true,
-              organization: {
-                isActive: true,
-                memberships: { some: { userId, isActive: true, user: { isActive: true } } },
-              },
-              memberships: { some: { userId, isActive: true } },
-            },
+            site: countSiteAccessWhere(userId, role),
           },
           { siteId: null, startedById: userId, startedBy: { isActive: true } },
         ],

@@ -167,6 +167,33 @@ describe("store count export authorization", () => {
     expectNotFound(await getExport());
   });
 
+  it("exports an organization Count for an active ADMIN without site membership", async () => {
+    authenticateAs({ id: "admin-a", role: "ADMIN", organizationId: "org-a" });
+    activeSiteMembership = false;
+    mocks.sessionFindFirst.mockImplementation(async ({ where }) => {
+      const branches = where.OR as Array<Record<string, unknown>>;
+      const site = (branches.find((branch) => branch.site) as {
+        site?: {
+          memberships?: unknown;
+          organization?: {
+            memberships?: { some?: { userId?: string; isActive?: boolean; user?: { isActive?: boolean; role?: string } } };
+          };
+        };
+      } | undefined)?.site;
+      const membership = site?.organization?.memberships?.some;
+      return where.id === session.id
+        && site?.memberships === undefined
+        && membership?.userId === "admin-a"
+        && membership.isActive === true
+        && membership.user?.isActive === true
+        && membership.user.role === "ADMIN"
+        ? session
+        : null;
+    });
+
+    expect((await getExport()).statusCode).toBe(200);
+  });
+
   it("rejects an unauthenticated export request", async () => {
     const response = await getExport();
 

@@ -9,7 +9,7 @@ it("discovers pending and reviewed counts only through active actor/site/organiz
   const captured: unknown[] = [];
   mocks.findMany.mockImplementation(async (query) => { captured.push(query); return [{ id: query.where.discrepancies.some?.status === "OPEN" ? "pending-completed" : "reviewed-completed" }]; });
   const app = Fastify();
-  app.addHook("preHandler", async (req) => { Object.assign(req, { user: { sub: "manager" } }); });
+  app.addHook("preHandler", async (req) => { Object.assign(req, { user: { sub: "manager", role: "GENERAL" } }); });
   await app.register(inventoryTruthReviewRoutes);
   const result = await app.inject({ method: "GET", url: "/counts/reviews" });
   expect(result.statusCode).toBe(200);

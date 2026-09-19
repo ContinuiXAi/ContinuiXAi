@@ -4,7 +4,7 @@ import type { Prisma, StoreCountDiscrepancy } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../lib/prisma.js";
 import { calculateStoreCountDiscrepancies } from "./storeCount.js";
-import { hasRequiredCountObservations, isCurrentCountAssignee, lockCountScope } from "../lib/storeCountWriteAccess.js";
+import { countSiteAccessWhere, hasRequiredCountObservations, isCurrentCountAssignee, lockCountScope } from "../lib/storeCountWriteAccess.js";
 
 const explanationSchema = z.object({
   reason: z.enum(["COULD_NOT_FIND", "WRONG_SHELF_OR_LOCATION", "RECEIVING_PROBLEM", "STOCKING_PROBLEM", "SALE_NOT_RECORDED", "DAMAGE_OR_EXPIRATION", "EMPTY_PACKAGE_POSSIBLE_THEFT", "PRODUCT_OR_PACKAGE_CHANGED", "OTHER_MANAGER_REVIEW"]),
@@ -14,8 +14,8 @@ const approvalSchema = z.object({ reviewToken: z.string().regex(/^[a-f0-9]{64}$/
 type Scope = { id: string; siteId: string; organizationId: string; status: string; startedAt: Date; assignedToId: string | null; organizationRole: string };
 
 // Every writer uses the same session-first lock order as Count capture/completion.
-async function lockScope(tx: Prisma.TransactionClient, sessionId: string, userId: string) {
-  return lockCountScope(tx, sessionId, userId);
+async function lockScope(tx: Prisma.TransactionClient, sessionId: string, userId: string, role?: string) {
+  return lockCountScope(tx, sessionId, userId, role);
 }
 async function lockDiscrepancy(tx: Prisma.TransactionClient, scope: Scope, id: string) {
   const rows = await tx.$queryRaw<StoreCountDiscrepancy[]>`
@@ -59,12 +59,9 @@ async function allVerified(tx: Prisma.TransactionClient, scope: Scope) {
 export async function inventoryTruthReviewRoutes(app: FastifyInstance) {
   app.get("/counts/reviews", async (request, reply) => {
     const userId = request.user.sub;
-    if (!userId) return reply.code(401).send({ error: "Sign in to find count reviews." });
-    const site = {
-      isActive: true,
-      memberships: { some: { userId, isActive: true, user: { isActive: true } } },
-      organization: { isActive: true, memberships: { some: { userId, isActive: true } } },
-    };
+    const role = request.user.role;
+    if (!userId || !role) return reply.code(401).send({ error: "Sign in to find count reviews." });
+    const site = countSiteAccessWhere(userId, role);
     const select = { id: true, name: true, status: true, startedAt: true, site: { select: { name: true } }, startedBy: { select: { name: true } } } as const;
     const [pending, completed] = await Promise.all([
       prisma.storeCountSession.findMany({ where: { site, status: { in: ["ACTIVE", "COMPLETED"] }, discrepancies: { some: { status: "OPEN" } } }, select, orderBy: [{ startedAt: "asc" }, { id: "asc" }], take: 100 }),
@@ -75,10 +72,11 @@ export async function inventoryTruthReviewRoutes(app: FastifyInstance) {
 
   app.get("/counts/:sessionId/review", async (request, reply) => {
     const userId = request.user.sub;
-    if (!userId) return reply.code(401).send({ error: "sign in to review this count" });
+    const role = request.user.role;
+    if (!userId || !role) return reply.code(401).send({ error: "sign in to review this count" });
     const { sessionId } = request.params as { sessionId: string };
     const result = await prisma.$transaction(async (tx) => {
-      const scope = await lockScope(tx, sessionId, userId);
+      const scope = await lockScope(tx, sessionId, userId, role);
       if (!scope) return null;
       const finalized = await allVerified(tx, scope);
       if (scope.status === "ACTIVE" && finalized) await calculateStoreCountDiscrepancies(tx, { sessionId, siteId: scope.siteId, organizationId: scope.organizationId });
@@ -106,10 +104,11 @@ export async function inventoryTruthReviewRoutes(app: FastifyInstance) {
     const parsed = explanationSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: "Choose a listed reason and a note of 500 characters or fewer." });
     const userId = request.user.sub;
-    if (!userId) return reply.code(401).send({ error: "sign in to explain this count" });
+    const role = request.user.role;
+    if (!userId || !role) return reply.code(401).send({ error: "sign in to explain this count" });
     const { sessionId, id } = request.params as { sessionId: string; id: string };
     const result = await prisma.$transaction(async (tx) => {
-      const scope = await lockScope(tx, sessionId, userId);
+      const scope = await lockScope(tx, sessionId, userId, role);
       if (!scope) return { code: 404, error: "count session not found" };
       if (!isCurrentCountAssignee(scope, userId)) return { code: 403, error: "Only the currently assigned employee can explain this count." };
       if (scope.status !== "ACTIVE") return { code: 409, error: "This count is locked. Its explanation cannot be changed." };
@@ -126,10 +125,11 @@ export async function inventoryTruthReviewRoutes(app: FastifyInstance) {
     const parsed = approvalSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: "Reload the review before approving this baseline." });
     const userId = request.user.sub;
-    if (!userId) return reply.code(401).send({ error: "sign in to approve this count" });
+    const role = request.user.role;
+    if (!userId || !role) return reply.code(401).send({ error: "sign in to approve this count" });
     const { sessionId, id } = request.params as { sessionId: string; id: string };
     const result = await prisma.$transaction(async (tx) => {
-      const scope = await lockScope(tx, sessionId, userId);
+      const scope = await lockScope(tx, sessionId, userId, role);
       if (!scope) return { code: 404, error: "count session not found" };
       if (!isManager(scope)) return { code: 403, error: "A manager with access to this store must approve the baseline." };
       if (!["ACTIVE", "COMPLETED"].includes(scope.status)) return { code: 409, error: "This count cannot be approved." };

@@ -7,7 +7,7 @@ import { isUniqueConstraintError } from "../lib/prismaErrors.js";
 import { resolveProduct } from "../lib/barcodeLookup/index.js";
 import { matchExistingCategory } from "../lib/barcodeLookup/categoryMatch.js";
 import { ensurePilotSiteForUser } from "../lib/pilotSite.js";
-import { assignedCountWhere, countWriteError, hasRequiredCountObservations, isCurrentCountAssignee, lockCountLocation, lockCountProduct, lockCountScope, requireCountWriter } from "../lib/storeCountWriteAccess.js";
+import { assignedCountWhere, countSiteAccessWhere, countWriteError, hasRequiredCountObservations, isCurrentCountAssignee, lockCountLocation, lockCountProduct, lockCountScope, requireCountWriter } from "../lib/storeCountWriteAccess.js";
 
 const createSessionSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
@@ -276,15 +276,7 @@ export function buildSummaryRows(entries: SummaryEntryInput[]): SummaryRow[] {
 async function resolveAuthorizedSite(userId: string, requestedSiteId?: string, role?: string) {
   const sites = await prisma.site.findMany({
     where: {
-      isActive: true,
-      organization: {
-        isActive: true,
-        memberships: { some: { userId, isActive: true } },
-      },
-      // ADMIN role users may access every site within an organization they
-      // belong to, without needing an individual per-site membership record.
-      // Still strictly org-scoped above: an ADMIN cannot see another org's sites.
-      ...(role === "ADMIN" ? {} : { memberships: { some: { userId, isActive: true } } }),
+      ...countSiteAccessWhere(userId, role),
       ...(requestedSiteId ? { id: requestedSiteId } : {}),
     },
     orderBy: [{ code: "asc" }, { id: "asc" }],
@@ -316,15 +308,10 @@ async function assertSessionAccess(
     where: {
       id: sessionId,
       OR: [
-        { siteId: null, ...(role === "ADMIN" ? {} : { startedById: userId }) },
+        { siteId: null, startedById: userId },
         {
           site: {
-            isActive: true,
-            memberships: { some: { userId, isActive: true } },
-            organization: {
-              isActive: true,
-              memberships: { some: { userId, isActive: true } },
-            },
+            ...countSiteAccessWhere(userId, role),
           },
         },
       ],
@@ -397,26 +384,44 @@ export async function storeCountRoutes(app: FastifyInstance) {
 
     const result = await prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`store-count:${userId}:${authorizedSite.id}`}))`;
-      const authorizedSites = await tx.$queryRaw<Array<{ id: string; organizationId: string }>>`
-        SELECT site."id", site."organizationId"
-        FROM "Site" AS site
-        INNER JOIN "SiteMembership" AS site_membership
-          ON site_membership."siteId" = site."id"
-        INNER JOIN "Organization" AS organization
-          ON organization."id" = site."organizationId"
-        INNER JOIN "OrganizationMembership" AS organization_membership
-          ON organization_membership."organizationId" = organization."id"
-        INNER JOIN "User" AS actor ON actor."id" = organization_membership."userId"
-        WHERE site."id" = ${authorizedSite.id}
-          AND site_membership."userId" = ${userId}
-          AND site_membership."isActive" = TRUE
-          AND organization_membership."userId" = ${userId}
-          AND organization_membership."isActive" = TRUE
-          AND site."isActive" = TRUE
-          AND organization."isActive" = TRUE
-          AND actor."isActive" = TRUE
-        FOR UPDATE OF site, site_membership, organization, organization_membership, actor
-      `;
+      const authorizedSites = request.user.role === "ADMIN"
+        ? await tx.$queryRaw<Array<{ id: string; organizationId: string }>>`
+            SELECT site."id", site."organizationId"
+            FROM "Site" AS site
+            INNER JOIN "Organization" AS organization
+              ON organization."id" = site."organizationId"
+            INNER JOIN "OrganizationMembership" AS organization_membership
+              ON organization_membership."organizationId" = organization."id"
+            INNER JOIN "User" AS actor ON actor."id" = organization_membership."userId"
+            WHERE site."id" = ${authorizedSite.id}
+              AND organization_membership."userId" = ${userId}
+              AND organization_membership."isActive" = TRUE
+              AND site."isActive" = TRUE
+              AND organization."isActive" = TRUE
+              AND actor."isActive" = TRUE
+              AND actor."role" = 'ADMIN'
+            FOR UPDATE OF site, organization, organization_membership, actor
+          `
+        : await tx.$queryRaw<Array<{ id: string; organizationId: string }>>`
+            SELECT site."id", site."organizationId"
+            FROM "Site" AS site
+            INNER JOIN "SiteMembership" AS site_membership
+              ON site_membership."siteId" = site."id"
+            INNER JOIN "Organization" AS organization
+              ON organization."id" = site."organizationId"
+            INNER JOIN "OrganizationMembership" AS organization_membership
+              ON organization_membership."organizationId" = organization."id"
+            INNER JOIN "User" AS actor ON actor."id" = organization_membership."userId"
+            WHERE site."id" = ${authorizedSite.id}
+              AND site_membership."userId" = ${userId}
+              AND site_membership."isActive" = TRUE
+              AND organization_membership."userId" = ${userId}
+              AND organization_membership."isActive" = TRUE
+              AND site."isActive" = TRUE
+              AND organization."isActive" = TRUE
+              AND actor."isActive" = TRUE
+            FOR UPDATE OF site, site_membership, organization, organization_membership, actor
+          `;
       const lockedSite = authorizedSites[0];
       if (!lockedSite) return { status: "forbidden" as const };
 
@@ -632,7 +637,7 @@ export async function storeCountRoutes(app: FastifyInstance) {
 
     try {
       const result = await prisma.$transaction(async (tx) => {
-        const scope = await requireCountWriter(tx, id, userId);
+        const scope = await requireCountWriter(tx, id, userId, role);
         await lockCountLocation(tx, scope, locationId);
 
         if (clientScanId) {
@@ -733,7 +738,7 @@ export async function storeCountRoutes(app: FastifyInstance) {
 
     try {
       return await prisma.$transaction(async (tx) => {
-        const scope = await requireCountWriter(tx, sessionId, userId);
+        const scope = await requireCountWriter(tx, sessionId, userId, role);
 
         const entry = await tx.storeCountEntry.findFirst({ where: { id: entryId, sessionId, location: { siteId: scope.siteId }, OR: [{ productId: null }, { product: { organizationId: scope.organizationId } }] } });
         if (!entry) throw new Error("ENTRY_NOT_FOUND");
@@ -896,7 +901,7 @@ export async function storeCountRoutes(app: FastifyInstance) {
     }
 
     const result = await prisma.$transaction(async (tx) => {
-      const locked = await lockCountScope(tx, id, userId);
+      const locked = await lockCountScope(tx, id, userId, role);
       if (!locked) return { status: "not-found" as const };
       if (locked.status !== "ACTIVE") return { status: "not-active" as const };
       if (!isCurrentCountAssignee(locked, userId)) return { status: "forbidden" as const };
@@ -994,7 +999,7 @@ export async function storeCountRoutes(app: FastifyInstance) {
 
     try {
       return await prisma.$transaction(async (tx) => {
-        const scope = await requireCountWriter(tx, id, userId);
+        const scope = await requireCountWriter(tx, id, userId, role);
         const approvals = await tx.storeCountDiscrepancy.count({ where: { sessionId: id, status: "APPROVED" } });
         if (approvals > 0) return reply.code(409).send({ error: "This count has approved adjustments and cannot be cancelled. Complete its remaining work." });
         return tx.storeCountSession.update({ where: { id, siteId: scope.siteId, status: "ACTIVE" }, data: { status: "CANCELLED", completedAt: new Date() } });
