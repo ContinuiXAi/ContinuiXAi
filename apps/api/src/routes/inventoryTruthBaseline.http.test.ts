@@ -15,7 +15,7 @@ const started = new Date("2026-09-15T01:00:00Z");
 
 async function request(sessionId: string, action = "review", reviewToken?: string) {
   const app = Fastify();
-  app.addHook("preHandler", async (req) => { Object.assign(req, { user: { sub: "manager" } }); });
+  app.addHook("preHandler", async (req) => { Object.assign(req, { user: { sub: "manager", role: "GENERAL" } }); });
   await app.register(inventoryTruthReviewRoutes);
   try { return await app.inject({ method: action === "review" ? "GET" : "POST", url: `/counts/${sessionId}/${action === "review" ? "review" : `discrepancies/${sessionId}/approve`}`, ...(reviewToken ? { payload: { reviewToken } } : {}) }); } finally { await app.close(); }
 }

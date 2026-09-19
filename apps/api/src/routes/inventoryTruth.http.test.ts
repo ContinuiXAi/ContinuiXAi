@@ -164,7 +164,7 @@ function hasAdminOrganizationAccessScope(where: Record<string, unknown>, session
       isActive?: boolean;
       organization?: {
         isActive?: boolean;
-        memberships?: { some?: { userId?: string; isActive?: boolean } };
+        memberships?: { some?: { userId?: string; isActive?: boolean; user?: { isActive?: boolean; role?: string } } };
       };
     };
   } | undefined;
@@ -173,7 +173,9 @@ function hasAdminOrganizationAccessScope(where: Record<string, unknown>, session
     && siteBranch.site.memberships === undefined
     && siteBranch.site.organization?.isActive === true
     && siteBranch.site.organization.memberships?.some?.userId === userId
-    && siteBranch.site.organization.memberships.some.isActive === true;
+    && siteBranch.site.organization.memberships.some.isActive === true
+    && siteBranch.site.organization.memberships.some.user?.isActive === true
+    && siteBranch.site.organization.memberships.some.user.role === "ADMIN";
 }
 
 describe("inventory truth HTTP routes", () => {
@@ -766,6 +768,23 @@ describe("inventory truth HTTP routes", () => {
     await app.close();
   });
 
+  it("revalidates the ADMIN role inside session creation before writing", async () => {
+    mocks.siteFindMany.mockResolvedValue([activeSite]);
+    mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray) =>
+      normalizedSql(strings).includes('actor."role" = \'ADMIN\'') ? [activeSite] : []);
+    const app = await testApp("ADMIN");
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/store-count/sessions",
+      payload: { siteId: "site-a", name: "ADMIN count" },
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(mocks.transactionSessionCreate).toHaveBeenCalled();
+    await app.close();
+  });
+
   it("keeps ADMIN session access organization-scoped without requiring site membership", async () => {
     mocks.sessionFindFirst.mockImplementation(async (args: { where: Record<string, unknown> }) =>
       hasAdminOrganizationAccessScope(args.where, "session-in-site-b", "user-a")
@@ -778,6 +797,38 @@ describe("inventory truth HTTP routes", () => {
 
     expect(response.statusCode).toBe(404);
     expect(mocks.sessionFindUnique).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("lets an active ADMIN organization member load a Count route without site membership", async () => {
+    mocks.sessionFindFirst.mockImplementation(async (args: { where: Record<string, unknown> }) => {
+      const site = args.where.site as {
+        memberships?: unknown;
+        organization?: {
+          memberships?: { some?: { userId?: string; isActive?: boolean; user?: { isActive?: boolean; role?: string } } };
+        };
+      } | undefined;
+      const membership = site?.organization?.memberships?.some;
+      return site
+        && site.memberships === undefined
+        && membership?.userId === "user-a"
+        && membership.isActive === true
+        && membership.user?.isActive === true
+        && membership.user.role === "ADMIN"
+        ? {
+            id: "session-a",
+            siteId: "site-a",
+            routeSnapshot: [],
+            site: { organizationId: "org-a" },
+          }
+        : null;
+    });
+    const app = await testApp("ADMIN");
+
+    const response = await app.inject({ method: "GET", url: "/api/inventory-truth/counts/session-a/route" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ sessionId: "session-a", expectedProducts: 0, locations: [] });
     await app.close();
   });
 
@@ -806,6 +857,45 @@ describe("inventory truth HTTP routes", () => {
       where: { id: "session-a", siteId: "site-a", status: "ACTIVE" },
       data: { status: "CANCELLED", completedAt: expect.any(Date) },
     });
+    await app.close();
+  });
+
+  it("lets an ADMIN assignee verify a Count location without site membership", async () => {
+    mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const sql = normalizedSql(strings);
+      if (sql.includes('actor."role" = \'ADMIN\'')) return [{ ...lockedCount, organizationRole: "ADMIN" }];
+      if (sql.includes('AS visit') && !sql.includes('"SiteMembership"')) return [{ ...lockedVisit, organizationRole: "ADMIN" }];
+      return [];
+    });
+    mocks.transactionVisitCount.mockResolvedValue(0);
+    const app = await testApp("ADMIN");
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/inventory-truth/counts/session-a/locations/shelf/verify",
+      payload: { offlineQueueFlushed: true },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const sql = mocks.transactionQueryRaw.mock.calls.map(([parts]) => normalizedSql(parts as TemplateStringsArray));
+    expect(sql.some((statement) => statement.includes('actor."role" = \'ADMIN\''))).toBe(true);
+    expect(sql.find((statement) => statement.includes('AS visit'))).not.toContain('"SiteMembership"');
+    await app.close();
+  });
+
+  it("lets an ADMIN organization member read Count discrepancies without site membership", async () => {
+    mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const sql = normalizedSql(strings);
+      if (sql.includes('actor."role" = \'ADMIN\'')) return [{ ...lockedCount, organizationRole: "ADMIN" }];
+      return [];
+    });
+    mocks.transactionVisitCount.mockResolvedValue(1);
+    const app = await testApp("ADMIN");
+
+    const response = await app.inject({ method: "GET", url: "/api/inventory-truth/counts/session-a/discrepancies" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ finalized: false, discrepancies: [] });
     await app.close();
   });
 
@@ -851,12 +941,17 @@ describe("inventory truth HTTP routes", () => {
         completedAt: expect.any(Date),
       },
     });
-    const [authorizationSql, ...authorizationValues] = mocks.transactionQueryRaw.mock.calls.find(([parts]) => (parts as TemplateStringsArray).join(" ").includes('AS visit'))!;
-    expect(authorizationSql.join(" ")).toMatch(/FOR UPDATE/);
-    expect(authorizationSql.join(" ")).toMatch(/session\."siteId" = location\."siteId"/);
-    expect(authorizationSql.join(" ")).toMatch(/SiteMembership/);
-    expect(authorizationSql.join(" ")).toMatch(/OrganizationMembership/);
-    expect(authorizationValues).toEqual(["session-a", "shelf", "user-a", "user-a"]);
+    const [visitSql, ...visitValues] = mocks.transactionQueryRaw.mock.calls.find(([parts]) => (parts as TemplateStringsArray).join(" ").includes('AS visit'))!;
+    expect(visitSql.join(" ")).toMatch(/FOR UPDATE OF visit/);
+    expect(visitSql.join(" ")).toMatch(/session\."siteId" = location\."siteId"/);
+    expect(visitSql.join(" ")).not.toMatch(/SiteMembership/);
+    expect(visitSql.join(" ")).not.toMatch(/OrganizationMembership/);
+    expect(visitValues).toEqual(["org-a", "session-a", "site-a", "shelf"]);
+    const scopeSql = mocks.transactionQueryRaw.mock.calls
+      .map(([parts]) => normalizedSql(parts as TemplateStringsArray))
+      .find((sql) => sql.includes('"SiteMembership"'));
+    expect(scopeSql).toContain('site_membership."userId" =');
+    expect(scopeSql).toContain('organization_membership."userId" =');
     await app.close();
   });
 
@@ -916,11 +1011,13 @@ describe("inventory truth HTTP routes", () => {
 
   it("does not let a caller from another site verify a visit when any authorization predicate is removed", async () => {
     mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
-      const fullyScoped = hasExactSessionAuthorization(strings, values, {
-        sessionId: "session-in-site-b",
-        locationId: "foreign-shelf",
-        userId: "user-a",
-      });
+      const sql = normalizedSql(strings);
+      const fullyScoped = sql.includes('"SiteMembership"')
+        && sql.includes('site_membership."userId" =')
+        && sql.includes('organization_membership."userId" =')
+        && sql.includes('site_membership."isActive" = TRUE')
+        && sql.includes('organization_membership."isActive" = TRUE')
+        && values.join("|") === "session-in-site-b|user-a|user-a";
       return fullyScoped ? [] : [{ ...lockedVisit, id: "session-in-site-b", siteId: "site-b", organizationId: "org-b" }];
     });
     const app = await testApp();
@@ -1379,7 +1476,7 @@ describe("inventory truth HTTP routes", () => {
     await app.close();
   });
 
-  it("requires the legacy starter even for a platform administrator", async () => {
+  it("hides another user's legacy session even from a platform administrator", async () => {
     const legacy = {
       ...createdSession,
       id: "legacy-session",
@@ -1401,7 +1498,7 @@ describe("inventory truth HTTP routes", () => {
 
     const response = await app.inject({ method: "POST", url: "/api/store-count/sessions/legacy-session/complete" });
 
-    expect(response.statusCode).toBe(403);
+    expect(response.statusCode).toBe(404);
     expect(mocks.transactionSessionUpdate).not.toHaveBeenCalled();
     await app.close();
   });
@@ -1559,11 +1656,13 @@ describe("inventory truth HTTP routes", () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json().assignedToId).toBe("user-b");
-    const [authorizationSql, ...authorizationValues] = mocks.transactionQueryRaw.mock.calls.find(([parts]) => (parts as TemplateStringsArray).join(" ").includes('organization_membership."role" IN'))!;
-    expect(authorizationSql.join(" ")).toMatch(/organization_membership\."role" IN \('OWNER', 'ADMIN', 'MANAGER'\)/);
+    const [authorizationSql, ...authorizationValues] = mocks.transactionQueryRaw.mock.calls.find(([parts]) => (parts as TemplateStringsArray).join(" ").includes('"SiteMembership"'))!;
+    expect(authorizationSql.join(" ")).toMatch(/organization_membership\."role" AS "organizationRole"/);
     expect(authorizationSql.join(" ")).toMatch(/SiteMembership/);
-    expect(authorizationSql.join(" ")).toMatch(/FOR UPDATE/);
+    expect(authorizationSql.join(" ")).toMatch(/FOR SHARE/);
     expect(authorizationValues).toEqual(["session-a", "user-a", "user-a"]);
+    expect(mocks.transactionQueryRaw.mock.calls.some(([parts, ...values]) =>
+      locksExactSession(parts as TemplateStringsArray, values, "session-a"))).toBe(true);
     expect(mocks.transactionSessionUpdate).toHaveBeenCalledWith({
       where: { id: "session-a", siteId: "site-a" },
       data: { assignedToId: "user-b" },
@@ -1580,6 +1679,27 @@ describe("inventory truth HTTP routes", () => {
     expect(mocks.transactionExpectationCreateMany).not.toHaveBeenCalled();
     expect(mocks.transactionVisitCreateMany).not.toHaveBeenCalled();
     expect(mocks.entryCount).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("lets an organization ADMIN reassign a Count without personal site membership", async () => {
+    mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const sql = normalizedSql(strings);
+      if (sql.includes('actor."role" = \'ADMIN\'')) return [{ ...lockedCount, organizationRole: "ADMIN" }];
+      return [];
+    });
+    mocks.transactionOrganizationMembershipFindFirst.mockResolvedValue({ userId: "user-b" });
+    mocks.transactionSessionUpdate.mockResolvedValue({ ...createdSession, assignedToId: "user-b" });
+    const app = await testApp("ADMIN");
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/inventory-truth/counts/session-a/reassign",
+      payload: { toUserId: "user-b", reason: "Supervisor handoff" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ assignedToId: "user-b" });
     await app.close();
   });
 
@@ -1729,7 +1849,7 @@ describe("inventory truth HTTP routes", () => {
       let releaseLock: (() => void) | undefined;
       const tx = {
         $queryRaw: vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => {
-          if (normalizedSql(strings).includes('organization_membership."role" IN')) {
+          if (values.includes("manager-a") && normalizedSql(strings).includes('"SiteMembership"')) {
             signalReassignLockAttempt();
           }
           if (strings.join(" ").includes("missing_observation")) return [];

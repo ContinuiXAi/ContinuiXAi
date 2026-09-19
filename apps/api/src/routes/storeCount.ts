@@ -7,7 +7,7 @@ import { isUniqueConstraintError } from "../lib/prismaErrors.js";
 import { resolveProduct } from "../lib/barcodeLookup/index.js";
 import { matchExistingCategory } from "../lib/barcodeLookup/categoryMatch.js";
 import { ensurePilotSiteForUser } from "../lib/pilotSite.js";
-import { assignedCountWhere, countWriteError, hasRequiredCountObservations, isCurrentCountAssignee, lockCountLocation, lockCountProduct, lockCountScope, requireCountWriter } from "../lib/storeCountWriteAccess.js";
+import { assignedCountWhere, countSiteAccessWhere, countWriteError, hasRequiredCountObservations, isCurrentCountAssignee, lockCountLocation, lockCountProduct, lockCountScope, requireCountWriter } from "../lib/storeCountWriteAccess.js";
 
 const createSessionSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
@@ -276,15 +276,7 @@ export function buildSummaryRows(entries: SummaryEntryInput[]): SummaryRow[] {
 async function resolveAuthorizedSite(userId: string, requestedSiteId?: string, role?: string) {
   const sites = await prisma.site.findMany({
     where: {
-      isActive: true,
-      organization: {
-        isActive: true,
-        memberships: { some: { userId, isActive: true } },
-      },
-      // ADMIN role users may access every site within an organization they
-      // belong to, without needing an individual per-site membership record.
-      // Still strictly org-scoped above: an ADMIN cannot see another org's sites.
-      ...(role === "ADMIN" ? {} : { memberships: { some: { userId, isActive: true } } }),
+      ...countSiteAccessWhere(userId, role),
       ...(requestedSiteId ? { id: requestedSiteId } : {}),
     },
     orderBy: [{ code: "asc" }, { id: "asc" }],
@@ -316,15 +308,10 @@ async function assertSessionAccess(
     where: {
       id: sessionId,
       OR: [
-        { siteId: null, ...(role === "ADMIN" ? {} : { startedById: userId }) },
+        { siteId: null, startedById: userId },
         {
           site: {
-            isActive: true,
-            ...(role === "ADMIN" ? {} : { memberships: { some: { userId, isActive: true } } }),
-            organization: {
-              isActive: true,
-              memberships: { some: { userId, isActive: true } },
-            },
+            ...countSiteAccessWhere(userId, role),
           },
         },
       ],
@@ -412,6 +399,7 @@ export async function storeCountRoutes(app: FastifyInstance) {
               AND site."isActive" = TRUE
               AND organization."isActive" = TRUE
               AND actor."isActive" = TRUE
+              AND actor."role" = 'ADMIN'
             FOR UPDATE OF site, organization, organization_membership, actor
           `
         : await tx.$queryRaw<Array<{ id: string; organizationId: string }>>`

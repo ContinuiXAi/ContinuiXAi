@@ -4,7 +4,7 @@ import { prisma } from "../lib/prisma.js";
 import { isUniqueConstraintError } from "../lib/prismaErrors.js";
 import { calculateStoreCountDiscrepancies } from "./storeCount.js";
 import { inventoryTruthReviewRoutes } from "./inventoryTruthReview.js";
-import { countWriteError, hasRequiredCountObservations, lockCountScope, requireCountWriter } from "../lib/storeCountWriteAccess.js";
+import { countSiteAccessWhere, countWriteError, hasRequiredCountObservations, lockCountScope, requireCountWriter } from "../lib/storeCountWriteAccess.js";
 
 const locationHintSchema = z.object({
   siteId: z.string().trim().min(1),
@@ -269,20 +269,14 @@ export async function inventoryTruthRoutes(app: FastifyInstance) {
 
   app.get("/counts/:sessionId/route", async (request, reply) => {
     const userId = request.user.sub;
-    if (!userId) return reply.code(401).send({ error: "invalid authenticated user" });
+    const role = request.user.role;
+    if (!userId || !role) return reply.code(401).send({ error: "invalid authenticated user" });
     const { sessionId } = request.params as { sessionId: string };
 
     const session = await prisma.storeCountSession.findFirst({
       where: {
         id: sessionId,
-        site: {
-          isActive: true,
-          memberships: { some: { userId, isActive: true } },
-          organization: {
-            isActive: true,
-            memberships: { some: { userId, isActive: true } },
-          },
-        },
+        site: countSiteAccessWhere(userId, role),
       },
       select: {
         id: true,
@@ -378,46 +372,34 @@ export async function inventoryTruthRoutes(app: FastifyInstance) {
     const parsed = verifyLocationSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
     const userId = request.user.sub;
-    if (!userId) return reply.code(401).send({ error: "invalid authenticated user" });
+    const role = request.user.role;
+    if (!userId || !role) return reply.code(401).send({ error: "invalid authenticated user" });
     const { sessionId, locationId } = request.params as { sessionId: string; locationId: string };
 
     try {
     const result = await prisma.$transaction(async (tx) => {
-      await requireCountWriter(tx, sessionId, userId);
+      const scope = await requireCountWriter(tx, sessionId, userId, role);
       const rows = await tx.$queryRaw<LockedVisit[]>`
         SELECT
           session."id",
           session."siteId",
-          site."organizationId",
+          ${scope.organizationId}::text AS "organizationId",
           session."status",
           session."assignedToId",
           visit."status" AS "visitStatus",
           visit."completedById",
           visit."completedAt"
         FROM "StoreCountSession" AS session
-        INNER JOIN "Site" AS site
-          ON site."id" = session."siteId"
-        INNER JOIN "Organization" AS organization
-          ON organization."id" = site."organizationId"
         INNER JOIN "StoreCountLocationVisit" AS visit
           ON visit."sessionId" = session."id"
         INNER JOIN "StoreLocation" AS location
           ON location."id" = visit."locationId"
           AND session."siteId" = location."siteId"
-        INNER JOIN "SiteMembership" AS site_membership
-          ON site_membership."siteId" = site."id"
-        INNER JOIN "OrganizationMembership" AS organization_membership
-          ON organization_membership."organizationId" = organization."id"
         WHERE session."id" = ${sessionId}
+          AND session."siteId" = ${scope.siteId}
           AND visit."locationId" = ${locationId}
-          AND site_membership."userId" = ${userId}
-          AND organization_membership."userId" = ${userId}
-          AND site_membership."isActive" = TRUE
-          AND organization_membership."isActive" = TRUE
           AND location."isActive" = TRUE
-          AND site."isActive" = TRUE
-          AND organization."isActive" = TRUE
-        FOR UPDATE OF session, visit
+        FOR UPDATE OF visit
       `;
       const locked = rows[0];
       if (!locked) return { status: "not-found" as const };
@@ -465,36 +447,12 @@ export async function inventoryTruthRoutes(app: FastifyInstance) {
 
   app.get("/counts/:sessionId/discrepancies", async (request, reply) => {
     const userId = request.user.sub;
-    if (!userId) return reply.code(401).send({ error: "invalid authenticated user" });
+    const role = request.user.role;
+    if (!userId || !role) return reply.code(401).send({ error: "invalid authenticated user" });
     const { sessionId } = request.params as { sessionId: string };
 
     const result = await prisma.$transaction(async (tx) => {
-      const rows = await tx.$queryRaw<LockedCount[]>`
-        SELECT
-          session."id",
-          session."siteId",
-          site."organizationId",
-          session."status",
-          session."assignedToId"
-        FROM "StoreCountSession" AS session
-        INNER JOIN "Site" AS site
-          ON site."id" = session."siteId"
-        INNER JOIN "Organization" AS organization
-          ON organization."id" = site."organizationId"
-        INNER JOIN "SiteMembership" AS site_membership
-          ON site_membership."siteId" = site."id"
-        INNER JOIN "OrganizationMembership" AS organization_membership
-          ON organization_membership."organizationId" = organization."id"
-        WHERE session."id" = ${sessionId}
-          AND site_membership."userId" = ${userId}
-          AND organization_membership."userId" = ${userId}
-          AND site_membership."isActive" = TRUE
-          AND organization_membership."isActive" = TRUE
-          AND site."isActive" = TRUE
-          AND organization."isActive" = TRUE
-        FOR UPDATE OF session
-      `;
-      const locked = rows[0];
+      const locked = await lockCountScope(tx, sessionId, userId, role);
       if (!locked) return null;
       if (locked.status === "COMPLETED") {
         const discrepancies = await tx.storeCountDiscrepancy.findMany({
@@ -537,42 +495,16 @@ export async function inventoryTruthRoutes(app: FastifyInstance) {
     const parsed = reassignSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
     const userId = request.user.sub;
-    if (!userId) return reply.code(401).send({ error: "invalid authenticated user" });
+    const role = request.user.role;
+    if (!userId || !role) return reply.code(401).send({ error: "invalid authenticated user" });
     const { sessionId } = request.params as { sessionId: string };
 
     let result;
     try {
       result = await prisma.$transaction(async (tx) => {
-      const scope = await lockCountScope(tx, sessionId, userId);
+      const scope = await lockCountScope(tx, sessionId, userId, role);
       if (!scope || !["OWNER", "ADMIN", "MANAGER"].includes(scope.organizationRole)) return { status: "forbidden" as const };
-      const rows = await tx.$queryRaw<LockedCount[]>`
-        SELECT
-          session."id",
-          session."siteId",
-          site."organizationId",
-          session."status",
-          session."assignedToId"
-        FROM "StoreCountSession" AS session
-        INNER JOIN "Site" AS site
-          ON site."id" = session."siteId"
-        INNER JOIN "Organization" AS organization
-          ON organization."id" = site."organizationId"
-        INNER JOIN "OrganizationMembership" AS organization_membership
-          ON organization_membership."organizationId" = organization."id"
-        INNER JOIN "SiteMembership" AS site_membership
-          ON site_membership."siteId" = site."id"
-        WHERE session."id" = ${sessionId}
-          AND organization_membership."userId" = ${userId}
-          AND site_membership."userId" = ${userId}
-          AND organization_membership."isActive" = TRUE
-          AND organization_membership."role" IN ('OWNER', 'ADMIN', 'MANAGER')
-          AND site_membership."isActive" = TRUE
-          AND organization."isActive" = TRUE
-          AND site."isActive" = TRUE
-        FOR UPDATE OF session
-      `;
-      const locked = rows[0];
-      if (!locked) return { status: "forbidden" as const };
+      const locked = scope;
       if (locked.status !== "ACTIVE") return { status: "not-active" as const };
 
       const recipient = await tx.organizationMembership.findFirst({

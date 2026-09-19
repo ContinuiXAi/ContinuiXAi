@@ -19,6 +19,28 @@ export function assignedCountWhere(userId: string) {
   return { OR: [{ assignedToId: userId }, { assignedToId: null, startedById: userId }] };
 }
 
+export function countSiteAccessWhere(userId: string, role?: string) {
+  return {
+    isActive: true,
+    organization: {
+      isActive: true,
+      memberships: {
+        some: {
+          userId,
+          isActive: true,
+          user: {
+            isActive: true,
+            ...(role === "ADMIN" ? { role: "ADMIN" as const } : {}),
+          },
+        },
+      },
+    },
+    ...(role === "ADMIN"
+      ? {}
+      : { memberships: { some: { userId, isActive: true, user: { isActive: true } } } }),
+  };
+}
+
 // Take the session lock BEFORE reading authorization. A request admitted before
 // reassignment/revocation may wait here; the next statement must see fresh state.
 // SHARE locks keep authority stable until commit without serializing all counts.
