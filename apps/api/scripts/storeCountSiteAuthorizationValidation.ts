@@ -18,6 +18,7 @@ async function main() {
   await app.ready();
 
   let userId: string | null = null;
+  let adminId: string | null = null;
   let organizationId: string | null = null;
 
   try {
@@ -31,6 +32,16 @@ async function main() {
     });
     userId = user.id;
 
+    const admin = await prisma.user.create({
+      data: {
+        name: "Organization-wide site admin",
+        email: `site-admin-${suffix}@example.test`,
+        passwordHash: "not-used",
+        role: "ADMIN",
+      },
+    });
+    adminId = admin.id;
+
     const organization = await prisma.organization.create({
       data: { name: "Two Site Count Validation", slug: `two-site-${suffix}` },
     });
@@ -38,6 +49,9 @@ async function main() {
 
     await prisma.organizationMembership.create({
       data: { organizationId: organization.id, userId: user.id, role: "INVENTORY", isActive: true },
+    });
+    await prisma.organizationMembership.create({
+      data: { organizationId: organization.id, userId: admin.id, role: "ADMIN", isActive: true },
     });
 
     const siteA = await prisma.site.create({
@@ -60,7 +74,25 @@ async function main() {
     const unauthorizedSessions = await prisma.storeCountSession.count({ where: { siteId: siteB.id, startedById: user.id } });
     assert(unauthorizedSessions === 0, `unauthorized Site B session was persisted (${unauthorizedSessions})`);
 
-    console.log("Store Count site authorization validation passed: SiteMembership prevents cross-site Count access inside one organization.");
+    const adminToken = app.jwt.sign({ sub: admin.id, role: "ADMIN", tv: 0 });
+    const adminStart = await app.inject({
+      method: "POST",
+      url: "/api/store-count/sessions",
+      headers: { authorization: `Bearer ${adminToken}` },
+      payload: { name: "Organization-wide admin count", siteId: siteB.id },
+    });
+    assert(adminStart.statusCode === 201, `organization ADMIN without SiteMembership could not start Count: ${adminStart.statusCode} ${adminStart.body}`);
+    const adminSession = JSON.parse(adminStart.body) as { id: string; siteId: string | null };
+    assert(adminSession.siteId === siteB.id, "organization ADMIN Count was created for the wrong site");
+
+    const adminRead = await app.inject({
+      method: "GET",
+      url: `/api/store-count/sessions/${adminSession.id}`,
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    assert(adminRead.statusCode === 200, `organization ADMIN could not read the Count after creation: ${adminRead.statusCode} ${adminRead.body}`);
+
+    console.log("Store Count site authorization validation passed: GENERAL access remains site-scoped and ADMIN access is organization-wide.");
   } finally {
     if (organizationId) {
       const siteIds = (await prisma.site.findMany({ where: { organizationId }, select: { id: true } })).map((site) => site.id);
@@ -71,6 +103,7 @@ async function main() {
       await prisma.site.deleteMany({ where: { organizationId } });
       await prisma.organization.deleteMany({ where: { id: organizationId } });
     }
+    if (adminId) await prisma.user.deleteMany({ where: { id: adminId } });
     if (userId) await prisma.user.deleteMany({ where: { id: userId } });
     await app.close();
     await prisma.$disconnect();
