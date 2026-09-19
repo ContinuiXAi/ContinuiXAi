@@ -320,7 +320,7 @@ async function assertSessionAccess(
         {
           site: {
             isActive: true,
-            memberships: { some: { userId, isActive: true } },
+            ...(role === "ADMIN" ? {} : { memberships: { some: { userId, isActive: true } } }),
             organization: {
               isActive: true,
               memberships: { some: { userId, isActive: true } },
@@ -397,26 +397,43 @@ export async function storeCountRoutes(app: FastifyInstance) {
 
     const result = await prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`store-count:${userId}:${authorizedSite.id}`}))`;
-      const authorizedSites = await tx.$queryRaw<Array<{ id: string; organizationId: string }>>`
-        SELECT site."id", site."organizationId"
-        FROM "Site" AS site
-        INNER JOIN "SiteMembership" AS site_membership
-          ON site_membership."siteId" = site."id"
-        INNER JOIN "Organization" AS organization
-          ON organization."id" = site."organizationId"
-        INNER JOIN "OrganizationMembership" AS organization_membership
-          ON organization_membership."organizationId" = organization."id"
-        INNER JOIN "User" AS actor ON actor."id" = organization_membership."userId"
-        WHERE site."id" = ${authorizedSite.id}
-          AND site_membership."userId" = ${userId}
-          AND site_membership."isActive" = TRUE
-          AND organization_membership."userId" = ${userId}
-          AND organization_membership."isActive" = TRUE
-          AND site."isActive" = TRUE
-          AND organization."isActive" = TRUE
-          AND actor."isActive" = TRUE
-        FOR UPDATE OF site, site_membership, organization, organization_membership, actor
-      `;
+      const authorizedSites = request.user.role === "ADMIN"
+        ? await tx.$queryRaw<Array<{ id: string; organizationId: string }>>`
+            SELECT site."id", site."organizationId"
+            FROM "Site" AS site
+            INNER JOIN "Organization" AS organization
+              ON organization."id" = site."organizationId"
+            INNER JOIN "OrganizationMembership" AS organization_membership
+              ON organization_membership."organizationId" = organization."id"
+            INNER JOIN "User" AS actor ON actor."id" = organization_membership."userId"
+            WHERE site."id" = ${authorizedSite.id}
+              AND organization_membership."userId" = ${userId}
+              AND organization_membership."isActive" = TRUE
+              AND site."isActive" = TRUE
+              AND organization."isActive" = TRUE
+              AND actor."isActive" = TRUE
+            FOR UPDATE OF site, organization, organization_membership, actor
+          `
+        : await tx.$queryRaw<Array<{ id: string; organizationId: string }>>`
+            SELECT site."id", site."organizationId"
+            FROM "Site" AS site
+            INNER JOIN "SiteMembership" AS site_membership
+              ON site_membership."siteId" = site."id"
+            INNER JOIN "Organization" AS organization
+              ON organization."id" = site."organizationId"
+            INNER JOIN "OrganizationMembership" AS organization_membership
+              ON organization_membership."organizationId" = organization."id"
+            INNER JOIN "User" AS actor ON actor."id" = organization_membership."userId"
+            WHERE site."id" = ${authorizedSite.id}
+              AND site_membership."userId" = ${userId}
+              AND site_membership."isActive" = TRUE
+              AND organization_membership."userId" = ${userId}
+              AND organization_membership."isActive" = TRUE
+              AND site."isActive" = TRUE
+              AND organization."isActive" = TRUE
+              AND actor."isActive" = TRUE
+            FOR UPDATE OF site, site_membership, organization, organization_membership, actor
+          `;
       const lockedSite = authorizedSites[0];
       if (!lockedSite) return { status: "forbidden" as const };
 
