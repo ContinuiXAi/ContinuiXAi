@@ -1,5 +1,7 @@
 name: CI
 
+# Temporary draft-branch trigger for PostgreSQL authorization validation.
+
 on:
   workflow_dispatch:
   push:
