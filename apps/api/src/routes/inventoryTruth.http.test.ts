@@ -157,12 +157,11 @@ function locksExactSession(strings: TemplateStringsArray, values: unknown[], ses
     );
 }
 
-function hasSharedSessionAccessScope(where: Record<string, unknown>, sessionId: string, userId: string): boolean {
+function hasAdminOrganizationAccessScope(where: Record<string, unknown>, sessionId: string, userId: string): boolean {
   const branches = Array.isArray(where.OR) ? where.OR as Array<Record<string, unknown>> : [];
   const siteBranch = branches.find((branch) => branch.site) as {
     site?: {
       isActive?: boolean;
-      memberships?: { some?: { userId?: string; isActive?: boolean } };
       organization?: {
         isActive?: boolean;
         memberships?: { some?: { userId?: string; isActive?: boolean } };
@@ -171,8 +170,7 @@ function hasSharedSessionAccessScope(where: Record<string, unknown>, sessionId: 
   } | undefined;
   return where.id === sessionId
     && siteBranch?.site?.isActive === true
-    && siteBranch.site.memberships?.some?.userId === userId
-    && siteBranch.site.memberships.some.isActive === true
+    && siteBranch.site.memberships === undefined
     && siteBranch.site.organization?.isActive === true
     && siteBranch.site.organization.memberships?.some?.userId === userId
     && siteBranch.site.organization.memberships.some.isActive === true;
@@ -768,9 +766,9 @@ describe("inventory truth HTTP routes", () => {
     await app.close();
   });
 
-  it("keeps every shared session-access organization and site relationship predicate", async () => {
+  it("keeps ADMIN session access organization-scoped without requiring site membership", async () => {
     mocks.sessionFindFirst.mockImplementation(async (args: { where: Record<string, unknown> }) =>
-      hasSharedSessionAccessScope(args.where, "session-in-site-b", "user-a")
+      hasAdminOrganizationAccessScope(args.where, "session-in-site-b", "user-a")
         ? null
         : { ...createdSession, id: "session-in-site-b", siteId: "site-b" },
     );
