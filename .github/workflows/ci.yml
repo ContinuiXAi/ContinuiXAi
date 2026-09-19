@@ -1,9 +1,11 @@
 name: CI
 
+# Temporary draft-branch trigger for PostgreSQL authorization validation.
+
 on:
   workflow_dispatch:
   push:
-    branches: [master, chatgpt-development, continuixai-ops-ci-integration, fix-empty-db-pilot-bootstrap]
+    branches: [master, chatgpt-development, continuixai-ops-ci-integration, fix-empty-db-pilot-bootstrap, fix/admin-site-authorization-consistency]
   pull_request:
     branches: [master, chatgpt-development]
 
