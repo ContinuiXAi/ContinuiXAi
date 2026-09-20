@@ -10,7 +10,17 @@ async function targetOrganizationIds(adminId: string, userId: string): Promise<s
   const user = await prisma.user.findUnique({ where: { id: userId }, select: { id: true } });
   if (!user) return null;
   const memberships = await prisma.organizationMembership.findMany({
-    where: { userId, isActive: true, organization: { isActive: true, memberships: { some: { userId: adminId, isActive: true } } } },
+    where: {
+      userId,
+      isActive: true,
+      organization: {
+        isActive: true,
+        // Match the org-scoped admin boundary used for password reset / deactivate / MFA reset
+        // (auth.ts's findOrganizationScopedAdminTarget): the acting admin must hold an active
+        // OWNER or ADMIN membership in the organization, not merely any membership at all.
+        memberships: { some: { userId: adminId, isActive: true, role: { in: ["OWNER", "ADMIN"] } } },
+      },
+    },
     select: { organizationId: true },
   });
   return memberships.length > 0 ? memberships.map((membership) => membership.organizationId) : null;

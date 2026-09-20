@@ -40,6 +40,23 @@ describe("administrator site membership routes", () => {
     }));
   });
 
+  it("scopes the membership lookup to organizations where the admin holds an OWNER or ADMIN role", async () => {
+    mocks.siteFindMany.mockResolvedValue([]);
+    const app = await testApp();
+    await app.inject({ method: "GET", url: "/api/site-memberships/users/employee" });
+    expect(mocks.organizationMembershipFindMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        userId: "employee",
+        isActive: true,
+        organization: {
+          isActive: true,
+          memberships: { some: { userId: "admin", isActive: true, role: { in: ["OWNER", "ADMIN"] } } },
+        },
+      },
+    }));
+    await app.close();
+  });
+
   it("lists only active sites in the target user's organizations", async () => {
     mocks.siteFindMany.mockResolvedValue([{ id: "site-a", name: "Main", code: "MAIN", memberships: [{ isActive: true }] }]);
     const app = await testApp();

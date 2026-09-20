@@ -63,21 +63,35 @@ includes('apps/api/src/routes/tasks.ts', [
 ]);
 
 includes('apps/web/app/my-work/page.tsx', [
-  'Continuixai Ops', 'Start My Day', 'Overdue', 'Completed today', 'Skipped today', 'Do not enter patient',
+  // "Continuixai Ops" is the retired product name (see lib/brandStandard.test.ts's
+  // OLD_VISIBLE_BRAND check, which requires this exact page to NOT contain it).
+  // The official brand lockup (BrandLockup, BRAND_NAME from lib/brand.ts) is what
+  // renders product identity here now.
+  'BrandLockup', 'Start My Day', 'Overdue', 'Completed today', 'Skipped today', 'Do not enter patient',
 ]);
 includes('apps/web/app/team-work/page.tsx', [
-  'Team Work', 'Recurring templates', 'One-time assignment', 'siteDateInitialized', 'teamData.date', 'Count sessions', 'Assigned to<select', 'idempotencyKey',
+  'Team Work', 'Recurring templates', 'One-time assignment', 'siteDateInitialized', 'teamData.date', 'Count sessions',
+  // The reassignment label is now conditional (isCountTask ? "Task owner (not count)" : "Assigned to"),
+  // so the literal source text ends with the closing JSX brace before <select>, not "Assigned to<select" directly.
+  'Assigned to"}<select', 'idempotencyKey',
 ]);
 includes('apps/web/app/daily-summary/page.tsx', [
   'accomplished today', 'Skipped today', 'Count sessions', 'Sign out',
 ]);
 includes('apps/web/app/manifest.ts', [
-  'name: "Continuixai Ops"', 'start_url: "/my-work"', 'name: "Start Count"',
+  // Manifest name/short_name are wired to the shared BRAND_NAME constant
+  // rather than a hardcoded literal (see lib/brandStandard.test.ts). start_url
+  // now points at the home launcher ("/", app/page.tsx — see
+  // test-pwa-home-launcher.mjs), which routes signed-in users onward, rather
+  // than opening directly on My Work.
+  'name: BRAND_NAME', 'start_url: "/"', 'name: "Start Count"',
 ]);
 includes('apps/web/public/sw.js', [
-  'continuixai-ops-shell-v8', 'title: "Continuixai Ops"', '"/my-work"',
+  // Cache name is version-suffixed and bumps on shell-asset changes; check the
+  // stable prefix rather than pinning an exact version that goes stale on every bump.
+  'continuixai-ops-shell-v', 'title: "Continuixai Ops"', '"/my-work"',
 ]);
-includes('apps/api/src/lib/mfa.ts', ['const issuer = "Continuixai Ops"']);
+includes('apps/api/src/lib/mfa.ts', ['issuer: "ContinuiXAi Ops"']);
 includes('apps/web/lib/storeCountQueue.ts', ['ownerUserId: string', 'continuixai_count_queue']);
 includes('apps/api/src/index.ts', ['ENABLE_LEGACY_INVENTORY_FEATURES', 'if (legacyInventoryFeaturesEnabled)']);
 includes('render.yaml', ['branch: continuixai-ops-completion', 'MFA_ENCRYPTION_KEY']);
