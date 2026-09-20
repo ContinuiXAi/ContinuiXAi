@@ -1,10 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { API_URL } from "../../lib/api";
 import { BRAND_NAME } from "../../lib/brand";
 import { BrandLockup } from "../../components/BrandLockup";
+import { loadPublicRegistrationStatus } from "../../lib/publicRegistration";
 
 const SPECIALS = "!@#$%^&*";
 
@@ -45,6 +46,11 @@ export default function RegisterPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [createdAccount, setCreatedAccount] = useState<CreatedAccount | null>(null);
+  const [registrationEnabled, setRegistrationEnabled] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    void loadPublicRegistrationStatus(API_URL).then(setRegistrationEnabled);
+  }, []);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -91,14 +97,32 @@ export default function RegisterPage() {
     );
   }
 
+  if (registrationEnabled !== true) {
+    return (
+      <main className="container">
+        <section style={{ maxWidth: 560, margin: "32px auto", padding: 24, border: "1px solid var(--color-border)", borderRadius: 16, background: "var(--color-surface)" }}>
+          <div style={{ marginBottom: 24 }}><BrandLockup /></div>
+          <h1>{registrationEnabled === null ? "Checking account access…" : "Administrator Approval Required"}</h1>
+          {registrationEnabled === false && (
+            <>
+              <p>Public account creation is disabled to protect store inventory.</p>
+              <p>Ask your ContinuiXAi administrator to create your employee account.</p>
+              <Link href="/login"><button type="button">Return to Sign In</button></Link>
+            </>
+          )}
+        </section>
+      </main>
+    );
+  }
+
   return (
     <main className="container">
       <div style={{ margin: "24px 0" }}><BrandLockup /></div>
       <h1>Create a New Account</h1>
       <p>{BRAND_NAME} will automatically assign you a unique Employee Number.</p>
       <form onSubmit={submit} className="form">
-        <input type="text" autoComplete="name" placeholder="Full name" value={name} onChange={(e) => setName(e.target.value)} required />
-        <input type="email" inputMode="email" autoComplete="email" placeholder="Email address" value={email} onChange={(e) => setEmail(e.target.value)} required />
+        <input type="text" autoComplete="name" placeholder="Full name" aria-label="Full name" value={name} onChange={(e) => setName(e.target.value)} required />
+        <input type="email" inputMode="email" autoComplete="email" placeholder="Email address" aria-label="Email address" value={email} onChange={(e) => setEmail(e.target.value)} required />
 
         <div style={{ padding: "12px 14px", border: "1px solid #555", borderRadius: 8 }}>
           <strong>Password requirements</strong>
@@ -112,14 +136,14 @@ export default function RegisterPage() {
           </ul>
         </div>
 
-        <input type={showPasswords ? "text" : "password"} autoComplete="new-password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} minLength={10} required />
-        <input type={showPasswords ? "text" : "password"} autoComplete="new-password" placeholder="Confirm password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} minLength={10} required />
+        <input type={showPasswords ? "text" : "password"} autoComplete="new-password" placeholder="Password" aria-label="Password" value={password} onChange={(e) => setPassword(e.target.value)} minLength={10} required />
+        <input type={showPasswords ? "text" : "password"} autoComplete="new-password" placeholder="Confirm password" aria-label="Confirm password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} minLength={10} required />
         <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <input type="checkbox" checked={showPasswords} onChange={(e) => setShowPasswords(e.target.checked)} />
           Show password
         </label>
 
-        <input type="password" inputMode="numeric" autoComplete="off" placeholder="6-digit Recovery PIN" value={recoveryPin} onChange={(e) => setRecoveryPin(e.target.value.replace(/\D/g, "").slice(0, 6))} pattern="\d{6}" required />
+        <input type="password" inputMode="numeric" autoComplete="off" placeholder="6-digit Recovery PIN" aria-label="6-digit Recovery PIN" value={recoveryPin} onChange={(e) => setRecoveryPin(e.target.value.replace(/\D/g, "").slice(0, 6))} pattern="\d{6}" required />
         <p style={{ fontSize: 14 }}>Your Recovery PIN verifies you if you forget your Employee Number or password. Do not share it.</p>
         <button type="submit" disabled={loading}>{loading ? "Creating account..." : "Create Account"}</button>
         {error && <p className="error-text" role="alert" aria-live="polite">{error}</p>}

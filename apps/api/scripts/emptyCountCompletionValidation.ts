@@ -49,6 +49,7 @@ async function main() {
     if (userId) {
       await prisma.storeCountScanLog.deleteMany({ where: { userId } });
       await prisma.storeCountEntry.deleteMany({ where: { countedByUserId: userId } });
+      await prisma.storeCountAssignmentEvent.deleteMany({ where: { session: { startedById: userId } } });
       await prisma.storeCountSession.deleteMany({ where: { startedById: userId } });
       await prisma.siteMembership.deleteMany({ where: { userId } });
       await prisma.organizationMembership.deleteMany({ where: { userId } });

@@ -12,3 +12,4 @@ uploads/
 # AI agent tooling config (local-only, not part of the app)
 .claude/
 .agents/
+.worktrees/

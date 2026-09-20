@@ -70,12 +70,12 @@ function TaskCard({ task, today, timeZone, onUpdate }: {
         </div>
       )}
       {scanTask && !isCompleted && (
-        <Link href="/store-count" className="work-link-button">{countTaskActionLabel(task)}</Link>
+        <><Link href="/store-count" className="work-link-button">{countTaskActionLabel(task)}</Link><p className="work-task-instructions">Finish the active count in Count. Marking this task done only updates My Work.</p></>
       )}
       <div className="work-task-actions" aria-label={`Actions for ${task.title}`}>
         {isSkipped && <span className="work-complete-badge">Skipped</span>}
         {!isCompleted && !isSkipped && task.status === "OPEN" && <button type="button" className="secondary" disabled={saving} onClick={() => void update({ status: "IN_PROGRESS" })}>Start task</button>}
-        {!isCompleted && !isSkipped && <button type="button" disabled={saving} onClick={() => void update({ status: "COMPLETED" })}>Complete</button>}
+        {!isCompleted && !isSkipped && <button type="button" disabled={saving} onClick={() => void update({ status: "COMPLETED" })}>{scanTask ? "Mark task done" : "Complete"}</button>}
         {isCompleted && <span className="work-complete-badge">Completed</span>}
       </div>
       {!isSkipped && <>

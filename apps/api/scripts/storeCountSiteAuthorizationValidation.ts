@@ -64,6 +64,7 @@ async function main() {
   } finally {
     if (organizationId) {
       const siteIds = (await prisma.site.findMany({ where: { organizationId }, select: { id: true } })).map((site) => site.id);
+      await prisma.storeCountAssignmentEvent.deleteMany({ where: { session: { siteId: { in: siteIds } } } });
       if (siteIds.length) await prisma.storeCountSession.deleteMany({ where: { siteId: { in: siteIds } } });
       await prisma.siteMembership.deleteMany({ where: { site: { organizationId } } });
       await prisma.organizationMembership.deleteMany({ where: { organizationId } });

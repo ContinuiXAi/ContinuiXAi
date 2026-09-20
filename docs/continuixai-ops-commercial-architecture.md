@@ -231,6 +231,16 @@ A counter should not need to understand tenants, databases, sync queues, idempot
 
 Managers may receive configuration, failed-scan reconciliation, product maintenance, assignment, export and reporting screens.
 
+### Current site stock state
+
+The manager product screen may show a selected site's current stock state. `On hand` is a read-only signed Decimal sum of that organization's `InventoryTransaction.quantity` rows for the selected site, serialized with four decimal places; it is not derived from the legacy `Item.quantity` field and may be negative. Active organization products are paginated by name then ID, including zero for products with no ledger rows. Both the site list and balances require an active user, organization, organization membership, site, and site membership; a global ADMIN role provides no bypass. `Committed` and `Incoming` are explicitly `notTracked` until those operational ledgers exist.
+
+`asOf` means **ledger creation cutoff**, not response time or a commit-time completeness guarantee. The server captures one application-clock timestamp before each page's balance read, filters `InventoryTransaction.createdAt <= asOf`, and uses that same cutoff for all rows in the page. `occurredAt` is deliberately not used: business events can be backdated. Only committed rows visible to the aggregate query are included. Pages are independently refreshed reads, not a repeatable-read snapshot across pagination; product metadata is also current at its query time. The UI labels this timestamp “Ledger creation cutoff.”
+
+Clock/visibility limits: `createdAt` is the system creation timestamp, immutable under the application's append-only ledger convention (not a database-enforced commit timestamp). Some writers supply application time and other inserts use the database default. Application/database clock skew can exclude a visible row whose timestamp is ahead of the cutoff, and a transaction begun earlier but committed later can enter a subsequent read. Synchronize these clocks operationally; a future historical/audit snapshot requiring commit-complete reproducibility needs a stronger database snapshot/watermark contract. This endpoint does not claim that guarantee.
+
+This current ledger view is separate from a count. Count's `Expected in store` remains the frozen expectation captured at count start and must never be relabeled as current stock.
+
 ## Hardware/device direction
 
 Keep one shared barcode handling pipeline independent of input source:

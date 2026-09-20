@@ -11,6 +11,20 @@ enum UserRole {
   GENERAL
 }
 
+// Which supply-chain segment an organization operates as. Drives which
+// product modules/UI surface for that org (retailer, wholesaler, repacker,
+// ...) without forking the codebase per segment. Defaults to RETAILER:
+// the first module being built out (2026-09-19); existing/not-yet-set orgs
+// are single-site pilot orgs, for which RETAILER is the correct default.
+enum BusinessType {
+  RETAILER
+  WHOLESALER
+  DISTRIBUTOR
+  REPACKER
+  CO_OP
+  OTHER
+}
+
 enum OrganizationRole {
   OWNER
   ADMIN
@@ -114,6 +128,39 @@ enum StoreCountSessionStatus {
   CANCELLED
 }
 
+enum ProductLocationEvidence {
+  ASSIGNED
+  PREVIOUSLY_COUNTED
+  RECENTLY_STOCKED
+  RECEIVED
+  DISPLAY_COMPONENT
+}
+
+enum StoreCountLocationVisitStatus {
+  PENDING
+  ACTIVE
+  VERIFIED
+}
+
+enum StoreCountDiscrepancyStatus {
+  OPEN
+  RESOLVED
+  APPROVED
+  REJECTED
+}
+
+enum StoreCountDiscrepancyReason {
+  COULD_NOT_FIND
+  WRONG_SHELF_OR_LOCATION
+  RECEIVING_PROBLEM
+  STOCKING_PROBLEM
+  SALE_NOT_RECORDED
+  DAMAGE_OR_EXPIRATION
+  EMPTY_PACKAGE_POSSIBLE_THEFT
+  PRODUCT_OR_PACKAGE_CHANGED
+  OTHER_MANAGER_REVIEW
+}
+
 enum JobTitle {
   STORE_MANAGER
   INVENTORY_MANAGER
@@ -163,6 +210,7 @@ model User {
   mfaSecretEncrypted  String?
   mfaEnabled          Boolean   @default(false)
   mfaBackupCodeHashes Json?
+  mfaLastTotpCounter  BigInt?
   role                UserRole  @default(GENERAL)
   isActive            Boolean   @default(true)
   tokenVersion        Int       @default(0)
@@ -173,9 +221,16 @@ model User {
   movements                StockMovement[]
   pushSubscriptions        PushSubscription[]
   auditSessions            AuditSession[]
-  storeCountSessions       StoreCountSession[]
+  storeCountSessions       StoreCountSession[]       @relation("StoreCountSessionStarter")
+  assignedStoreCountSessions StoreCountSession[]     @relation("StoreCountSessionAssignee")
   storeCountEntriesCounted StoreCountEntry[]        @relation("StoreCountEntryCounter")
   storeCountScanLogs       StoreCountScanLog[]      @relation("StoreCountScanActor")
+  completedLocationVisits  StoreCountLocationVisit[] @relation("StoreCountLocationVisitCompleter")
+  storeCountAssignmentsFrom StoreCountAssignmentEvent[] @relation("StoreCountAssignmentFrom")
+  storeCountAssignmentsTo StoreCountAssignmentEvent[] @relation("StoreCountAssignmentTo")
+  storeCountAssignmentsMade StoreCountAssignmentEvent[] @relation("StoreCountAssignmentActor")
+  reviewedStoreCountDiscrepancies StoreCountDiscrepancy[] @relation("StoreCountDiscrepancyReviewer")
+  explainedStoreCountDiscrepancies StoreCountDiscrepancy[] @relation("StoreCountDiscrepancyExplainer")
   organizationMemberships  OrganizationMembership[]
   siteMemberships          SiteMembership[]
   inventoryTransactions    InventoryTransaction[]   @relation("InventoryTransactionActor")
@@ -184,25 +239,55 @@ model User {
   assignedTasks            TaskAssignment[]         @relation("TaskAssignedTo")
   completedTasks           TaskAssignment[]         @relation("TaskCompletedBy")
   taskAssignmentEvents     TaskAssignmentEvent[]    @relation("TaskAssignmentEventActor")
+  sessions                 UserSession[]
+  securityAuditEvents      SecurityAuditEvent[]      @relation("SecurityAuditActor")
 
   @@index([isActive])
   @@index([jobTitle, isActive])
   @@index([recoveryLockedUntil])
 }
 
+model UserSession {
+  id           String    @id @default(cuid())
+  userId       String
+  tokenVersion Int
+  createdAt    DateTime  @default(now())
+  expiresAt    DateTime
+  revokedAt    DateTime?
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+  @@index([expiresAt])
+}
+
+model SecurityAuditEvent {
+  id          String   @id @default(cuid())
+  actorUserId String?
+  targetUserId String?
+  action      String
+  reason      String?
+  createdAt   DateTime @default(now())
+  actor       User?    @relation("SecurityAuditActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([targetUserId, createdAt])
+  @@index([action, createdAt])
+}
+
 model Organization {
-  id        String   @id @default(cuid())
-  name      String
-  slug      String   @unique
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id           String       @id @default(cuid())
+  name         String
+  slug         String       @unique
+  businessType BusinessType @default(RETAILER)
+  isActive     Boolean      @default(true)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
 
   memberships           OrganizationMembership[]
   sites                 Site[]
   products              Product[]
   productIdentifiers    ProductIdentifier[]
   inventoryTransactions InventoryTransaction[]
+  productLocationHints  ProductLocationHint[]
   taskTemplates         TaskTemplate[]
   taskAssignments       TaskAssignment[]
   taskAssignmentEvents   TaskAssignmentEvent[]
@@ -264,6 +349,7 @@ model Site {
   storeLocations        StoreLocation[]
   storeCountSessions    StoreCountSession[]
   inventoryTransactions InventoryTransaction[]
+  productLocationHints  ProductLocationHint[]
   taskTemplates         TaskTemplate[]
   taskAssignments       TaskAssignment[]
   taskAssignmentEvents   TaskAssignmentEvent[]
@@ -471,12 +557,24 @@ model StoreLocation {
   site                  Site?                  @relation(fields: [siteId], references: [id], onDelete: Restrict)
   entries               StoreCountEntry[]
   inventoryTransactions InventoryTransaction[]
+  productLocationHints  ProductLocationHint[]
+  storeCountVisits      StoreCountLocationVisit[]
 
   // Legacy global uniqueness is retained during the compatibility phase.
   // A later migration will make siteId required and replace this with @@unique([siteId, code]).
   @@unique([code])
   @@index([isActive, sortOrder])
   @@index([siteId, isActive, sortOrder])
+}
+
+// Cycle-count MVP (see 2026-09-19 competitor research, P1): ABC classification
+// drives which subset of products a scoped StoreCountSession expects and
+// routes to. Nullable and unset by default — a product with no class is simply
+// excluded from any class-scoped cycle count (never from a full, unscoped count).
+enum ProductCycleCountClass {
+  A
+  B
+  C
 }
 
 model Product {
@@ -489,6 +587,7 @@ model Product {
   packageSize    String?
   imageUrl       String?
   categoryId     String?
+  cycleCountClass ProductCycleCountClass?
   isActive       Boolean  @default(true)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
@@ -499,6 +598,10 @@ model Product {
   identifiers           ProductIdentifier[]
   packaging             ProductPackaging[]
   inventoryTransactions InventoryTransaction[]
+  locationHints           ProductLocationHint[]
+  compositionMemberships  ProductComposition[]
+  storeCountExpectations  StoreCountExpectation[]
+  storeCountDiscrepancies StoreCountDiscrepancy[]
 
   // barcodeValue remains temporarily for backwards compatibility with the proven
   // Store Count flow. ProductIdentifier is the commercial multi-identifier model.
@@ -506,6 +609,7 @@ model Product {
   @@index([isActive])
   @@index([organizationId, isActive])
   @@index([categoryId])
+  @@index([organizationId, cycleCountClass])
 }
 
 model ProductPackaging {
@@ -530,6 +634,7 @@ model ProductPackaging {
   product               Product                @relation(fields: [productId], references: [id], onDelete: Cascade)
   identifiers           ProductIdentifier[]
   inventoryTransactions InventoryTransaction[]
+  compositions          ProductComposition[]
 
   @@unique([productId, level, unitsOfEach])
   @@index([productId, isActive])
@@ -558,34 +663,57 @@ model ProductIdentifier {
 }
 
 model StoreCountSession {
-  id          String                  @id @default(cuid())
-  siteId      String?
-  name        String?
-  status      StoreCountSessionStatus @default(ACTIVE)
-  startedById String?
-  startedAt   DateTime                @default(now())
-  completedAt DateTime?
-  updatedAt   DateTime                @updatedAt
+  id           String                  @id @default(cuid())
+  siteId       String?
+  name         String?
+  status       StoreCountSessionStatus @default(ACTIVE)
+  startedById  String?
+  assignedToId String?
+  startedAt    DateTime                @default(now())
+  completedAt  DateTime?
+  routeSnapshot Json @default("[]")
+  // Null = full-site count (original, unscoped behavior — unchanged). Set =
+  // this session expects/routes only products of that ABC class at the site.
+  cycleCountClass ProductCycleCountClass?
+  updatedAt    DateTime                @updatedAt
 
-  site      Site?             @relation(fields: [siteId], references: [id], onDelete: Restrict)
-  startedBy User?             @relation(fields: [startedById], references: [id], onDelete: SetNull)
-  entries   StoreCountEntry[]
+  site             Site?                       @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  startedBy        User?                       @relation("StoreCountSessionStarter", fields: [startedById], references: [id], onDelete: SetNull)
+  assignedTo       User?                       @relation("StoreCountSessionAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
+  entries          StoreCountEntry[]
+  expectations     StoreCountExpectation[]
+  locationVisits   StoreCountLocationVisit[]
+  assignmentEvents StoreCountAssignmentEvent[]
+  discrepancies    StoreCountDiscrepancy[]
 
+  // The cycle-count freeze (at most one ACTIVE session per site per class) is
+  // enforced in the /sessions handler via the same advisory-lock-then-recheck
+  // pattern already used for the per-user idempotent-session lookup below,
+  // not a DB constraint — consistent with how this file guards every other
+  // count-session invariant (see resolveAuthorizedSite / lockCountScope).
   @@index([siteId, status, startedAt])
   @@index([startedById, status])
+  @@index([assignedToId, status])
   @@index([status, startedAt])
+  @@index([siteId, cycleCountClass, status])
 }
 
 model StoreCountEntry {
-  id              String   @id @default(cuid())
+  id              String    @id @default(cuid())
   sessionId       String
   productId       String?
   barcodeValue    String
   locationId      String
-  quantity        Int      @default(1)
+  quantity        Int       @default(1)
   countedByUserId String?
-  scannedAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  scannedAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  // Retailer module: optional use-by/expiration date captured for the units
+  // counted at this session/location/barcode. Nullable and scan-optional —
+  // most scans never set it, and re-scanning without a date must not erase
+  // a date recorded on an earlier scan (see the ON CONFLICT clause in the
+  // /sessions/:id/scan handler, which COALESCEs rather than overwrites).
+  expiresAt       DateTime?
 
   session   StoreCountSession   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   product   Product?            @relation(fields: [productId], references: [id], onDelete: SetNull)
@@ -599,6 +727,7 @@ model StoreCountEntry {
   @@index([productId])
   @@index([locationId])
   @@index([countedByUserId])
+  @@index([sessionId, expiresAt])
 }
 
 model StoreCountScanLog {
@@ -621,7 +750,7 @@ model InventoryTransaction {
   id             String                   @id @default(cuid())
   organizationId String
   siteId         String
-  locationId     String
+  locationId     String?
   productId      String
   packagingId    String?
   type           InventoryTransactionType
@@ -637,16 +766,138 @@ model InventoryTransaction {
 
   organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Restrict)
   site         Site              @relation(fields: [siteId], references: [id], onDelete: Restrict)
-  location     StoreLocation     @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  location     StoreLocation?    @relation(fields: [locationId], references: [id], onDelete: Restrict)
   product      Product           @relation(fields: [productId], references: [id], onDelete: Restrict)
   packaging    ProductPackaging? @relation(fields: [packagingId], references: [id], onDelete: SetNull)
   actor        User?             @relation("InventoryTransactionActor", fields: [actorUserId], references: [id], onDelete: SetNull)
 
   @@index([organizationId, siteId, occurredAt])
+  // Query shape accepted by PostgreSQL 17 CI validation (300,000 synthetic
+  // events, 36 plans, 7.829 ms average); that does not prove production
+  // index-build duration, storage/WAL demand, or lock safety.
+  @@index([organizationId, siteId, productId, occurredAt, createdAt], map: "InventoryTransaction_history_idx")
   @@index([locationId, productId, occurredAt])
   @@index([productId, occurredAt])
   @@index([referenceType, referenceId])
   @@index([actorUserId, occurredAt])
+}
+
+model ProductLocationHint {
+  id             String                  @id @default(cuid())
+  organizationId String
+  siteId         String
+  productId      String
+  locationId     String
+  evidence       ProductLocationEvidence
+  isRequired     Boolean                 @default(true)
+  lastObservedAt DateTime?
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  site         Site          @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  product      Product       @relation(fields: [productId], references: [id], onDelete: Restrict)
+  location     StoreLocation @relation(fields: [locationId], references: [id], onDelete: Restrict)
+
+  @@unique([siteId, productId, locationId])
+  @@index([organizationId, siteId, locationId])
+  @@index([productId])
+}
+
+model ProductComposition {
+  id                 String   @id @default(cuid())
+  parentPackagingId  String
+  componentProductId String
+  quantityPerParent  Int
+  version            Int      @default(1)
+  isActive           Boolean  @default(true)
+  createdAt          DateTime @default(now())
+
+  parentPackaging  ProductPackaging @relation(fields: [parentPackagingId], references: [id], onDelete: Restrict)
+  componentProduct Product          @relation(fields: [componentProductId], references: [id], onDelete: Restrict)
+
+  @@unique([parentPackagingId, componentProductId, version], map: "ProductComposition_parentPackaging_componentProduct_version_key")
+  @@index([componentProductId, isActive])
+}
+
+model StoreCountExpectation {
+  id               String   @id @default(cuid())
+  sessionId        String
+  productId        String
+  expectedStoreQty Decimal  @db.Decimal(18, 4)
+  createdAt        DateTime @default(now())
+
+  session StoreCountSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  product Product           @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  @@unique([sessionId, productId])
+  @@index([productId])
+}
+
+model StoreCountLocationVisit {
+  id            String                        @id @default(cuid())
+  sessionId     String
+  locationId    String
+  status        StoreCountLocationVisitStatus @default(PENDING)
+  completedById String?
+  completedAt   DateTime?
+
+  session     StoreCountSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  location    StoreLocation     @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  completedBy User?             @relation("StoreCountLocationVisitCompleter", fields: [completedById], references: [id], onDelete: SetNull)
+
+  @@unique([sessionId, locationId])
+  @@index([locationId, status])
+  @@index([completedById])
+}
+
+model StoreCountAssignmentEvent {
+  id           String   @id @default(cuid())
+  sessionId    String
+  fromUserId   String?
+  toUserId     String
+  assignedById String
+  reason       String?
+  occurredAt   DateTime @default(now())
+
+  session    StoreCountSession @relation(fields: [sessionId], references: [id], onDelete: Restrict)
+  fromUser   User?             @relation("StoreCountAssignmentFrom", fields: [fromUserId], references: [id], onDelete: SetNull)
+  toUser     User              @relation("StoreCountAssignmentTo", fields: [toUserId], references: [id], onDelete: Restrict)
+  assignedBy User              @relation("StoreCountAssignmentActor", fields: [assignedById], references: [id], onDelete: Restrict)
+
+  @@index([sessionId, occurredAt])
+  @@index([fromUserId])
+  @@index([toUserId, occurredAt])
+  @@index([assignedById])
+}
+
+model StoreCountDiscrepancy {
+  id               String                       @id @default(cuid())
+  sessionId        String
+  productId        String
+  expectedStoreQty Decimal                      @db.Decimal(18, 4)
+  actualStoreQty   Decimal                      @db.Decimal(18, 4)
+  difference       Decimal                      @db.Decimal(18, 4)
+  reason           StoreCountDiscrepancyReason?
+  note             String?
+  status           StoreCountDiscrepancyStatus  @default(OPEN)
+  reviewedById     String?
+  reviewedAt       DateTime?
+  explainedById    String?
+  explainedAt      DateTime?
+  createdAt        DateTime                     @default(now())
+  updatedAt        DateTime                     @updatedAt
+
+  session    StoreCountSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  product    Product           @relation(fields: [productId], references: [id], onDelete: Restrict)
+  reviewedBy User?             @relation("StoreCountDiscrepancyReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  explainedBy User?            @relation("StoreCountDiscrepancyExplainer", fields: [explainedById], references: [id], onDelete: SetNull)
+
+  @@unique([sessionId, productId])
+  @@index([sessionId, status])
+  @@index([productId, status])
+  @@index([reviewedById])
+  @@index([explainedById])
 }
 
 model TaskTemplate {

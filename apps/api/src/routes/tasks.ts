@@ -495,7 +495,7 @@ export async function taskRoutes(app: FastifyInstance) {
 
     await materializeTeamWorkWindow(context, start, end);
 
-    const assignments = await prisma.taskAssignment.findMany({
+    const [assignments, activeCounts] = await Promise.all([prisma.taskAssignment.findMany({
       where: {
         organizationId: context.site.organizationId,
         siteId: context.site.id,
@@ -510,8 +510,27 @@ export async function taskRoutes(app: FastifyInstance) {
       },
       orderBy: [{ scheduledDate: "asc" }, { priority: "desc" }, { dueAt: "asc" }],
       take: 1000,
-    });
-    return { date: dateKey(today), site: context.site, assignments };
+    }), prisma.storeCountSession.findMany({
+      where: { siteId: context.site.id, status: "ACTIVE" },
+      select: {
+        id: true,
+        name: true,
+        startedAt: true,
+        assignedToId: true,
+        assignedTo: { select: { id: true, name: true, employeeNumber: true } },
+        assignmentEvents: {
+          orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
+          take: 20,
+          include: {
+            fromUser: { select: { id: true, name: true } },
+            toUser: { select: { id: true, name: true } },
+            assignedBy: { select: { id: true, name: true } },
+          },
+        },
+      },
+      orderBy: [{ startedAt: "asc" }, { id: "asc" }],
+    })]);
+    return { date: dateKey(today), site: context.site, assignments, activeCounts };
   });
 
   app.get("/templates", async (request, reply) => {

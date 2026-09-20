@@ -2,7 +2,16 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as scannerEngine from "./scannerEngine";
-import { preferredScannerEngine, retailDecodeConfig, shouldEmitRetailScan } from "./scannerEngine";
+import {
+  getRetailScannerFocusRegion,
+  mapRetailScannerFocusToDisplay,
+  getScannerGuidance,
+  preferredScannerEngine,
+  RETAIL_FRAME_MAX_WIDTH,
+  retailDecodeConfig,
+  SCANNER_FRAME_INTERVAL_MS,
+  shouldEmitRetailScan,
+} from "./scannerEngine";
 
 afterEach(() => {
   document.head.querySelectorAll("script[data-continuix-quagga]").forEach((script) => script.remove());
@@ -19,9 +28,11 @@ describe("retail scanner engine", () => {
   it("limits decoding to the retail formats used by store products", () => {
     const config = retailDecodeConfig("data:image/jpeg;base64,frame") as {
       locate: boolean;
+      inputStream: { size: number };
       decoder: { readers: string[] };
     };
     expect(config.locate).toBe(true);
+    expect(config.inputStream.size).toBeLessThanOrEqual(RETAIL_FRAME_MAX_WIDTH);
     expect(config.decoder.readers).toEqual([
       "upc_reader",
       "ean_reader",
@@ -29,6 +40,47 @@ describe("retail scanner engine", () => {
       "upc_e_reader",
       "code_128_reader",
     ]);
+    expect(config.decoder.readers).not.toContain("qr_reader");
+  });
+
+  it("centers a focused retail decode region and excludes the outer frame", () => {
+    expect(getRetailScannerFocusRegion(1280, 720)).toEqual({
+      sx: 154,
+      sy: 209,
+      sw: 973,
+      sh: 302,
+    });
+  });
+
+  it("maps the decoded region onto a landscape video displayed with cover scaling", () => {
+    expect(mapRetailScannerFocusToDisplay(1280, 720, 360, 270)).toEqual({
+      left: 0,
+      top: 78,
+      width: 360,
+      height: 114,
+    });
+  });
+
+  it("maps the decoded region onto a portrait video displayed with cover scaling", () => {
+    expect(mapRetailScannerFocusToDisplay(720, 1280, 360, 270)).toEqual({
+      left: 44,
+      top: 1,
+      width: 273,
+      height: 269,
+    });
+  });
+
+  it("uses a bounded faster decode cadence", () => {
+    expect(SCANNER_FRAME_INTERVAL_MS).toBeGreaterThanOrEqual(140);
+    expect(SCANNER_FRAME_INTERVAL_MS).toBeLessThanOrEqual(220);
+  });
+
+  it("gives calm, actionable guidance as a scan attempt takes longer", () => {
+    expect(getScannerGuidance(0)).toBe("Center one barcode inside the box.");
+    expect(getScannerGuidance(1_999)).toBe("Center one barcode inside the box.");
+    expect(getScannerGuidance(2_000)).toBe("Hold steady and fill the box with the barcode.");
+    expect(getScannerGuidance(4_999)).toBe("Hold steady and fill the box with the barcode.");
+    expect(getScannerGuidance(5_000)).toBe("Try more light or tap ‘Barcode won’t scan?’");
   });
 
   it("suppresses repeated reads of the same barcode until the quiet period passes", () => {

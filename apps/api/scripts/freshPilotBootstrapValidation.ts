@@ -56,6 +56,8 @@ async function main() {
     console.log("Fresh pilot bootstrap validation passed: first registered user can safely create the initial organization/site and start Count.");
   } finally {
     if (userId) {
+      // Only this disposable fixture's events; production RESTRICT stays intact.
+      await prisma.storeCountAssignmentEvent.deleteMany({ where: { session: { startedById: userId } } });
       await prisma.storeCountSession.deleteMany({ where: { startedById: userId } });
       await prisma.siteMembership.deleteMany({ where: { userId } });
       await prisma.organizationMembership.deleteMany({ where: { userId } });

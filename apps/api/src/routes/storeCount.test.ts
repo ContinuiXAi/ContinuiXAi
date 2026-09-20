@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { buildSummaryRows, type SummaryEntryInput } from "./storeCount.js";
+import {
+  buildExpectationSnapshotData,
+  buildLocationVisitData,
+  buildSummaryRows,
+  type SummaryEntryInput,
+} from "./storeCount.js";
+import * as storeCountModule from "./storeCount.js";
 
 describe("buildSummaryRows", () => {
   it("merges different barcodes that resolve to the same product", () => {
@@ -72,5 +78,84 @@ describe("buildSummaryRows", () => {
 
   it("returns an empty array for an empty session", () => {
     expect(buildSummaryRows([])).toEqual([]);
+  });
+
+  it("keeps an explicitly checked zero entry in store and location totals", () => {
+    const rows = buildSummaryRows([
+      { productId: "absent-product", barcodeValue: "000000000009", quantity: 0, locationId: "loc_a", location: { code: "A1" }, product: { name: "Absent vitamin", packageSize: "39 tablets" } },
+    ]);
+    expect(rows).toEqual([{
+      key: "absent-product",
+      productId: "absent-product",
+      barcodeValue: "000000000009",
+      productName: "Absent vitamin",
+      packageSize: "39 tablets",
+      total: 0,
+      byLocation: { loc_a: { locationCode: "A1", quantity: 0 } },
+    }]);
+  });
+});
+
+describe("store count inventory truth snapshots", () => {
+  it("preserves signed store totals, including sums produced by locationless events", () => {
+    expect(buildExpectationSnapshotData([
+      { productId: "product-a", _sum: { quantity: 15 } },
+      { productId: "product-b", _sum: { quantity: -2 } },
+    ], "session-a")).toEqual([
+      { sessionId: "session-a", productId: "product-a", expectedStoreQty: 15 },
+      { sessionId: "session-a", productId: "product-b", expectedStoreQty: -2 },
+    ]);
+  });
+
+  it("creates one deterministic visit per active required hinted location", () => {
+    expect(buildLocationVisitData([
+      { locationId: "back", location: { id: "back", sortOrder: 20, code: "BACK" } },
+      { locationId: "shelf", location: { id: "shelf", sortOrder: 10, code: "A1" } },
+      { locationId: "shelf", location: { id: "shelf", sortOrder: 10, code: "A1" } },
+      { locationId: "shelf-z", location: { id: "shelf-z", sortOrder: 10, code: "A1" } },
+    ], "session-a")).toEqual([
+      { sessionId: "session-a", locationId: "shelf" },
+      { sessionId: "session-a", locationId: "shelf-z" },
+      { sessionId: "session-a", locationId: "back" },
+    ]);
+  });
+});
+
+describe("store count discrepancy rows", () => {
+  it("omits products whose physical store total matches the expectation", () => {
+    const buildDiscrepancyRows = (storeCountModule as Record<string, unknown>).buildDiscrepancyRows as
+      | ((expectations: Array<{ productId: string; expectedStoreQty: number }>, actuals: Array<{ productId: string; _sum: { quantity: number | null } }>, sessionId: string) => unknown[])
+      | undefined;
+
+    expect(typeof buildDiscrepancyRows).toBe("function");
+    expect(buildDiscrepancyRows?.(
+      [{ productId: "matched-product", expectedStoreQty: 10 }],
+      [{ productId: "matched-product", _sum: { quantity: 10 } }],
+      "session-a",
+    )).toEqual([]);
+  });
+
+  it("produces one signed shortage or overage row per session and product", () => {
+    const buildDiscrepancyRows = (storeCountModule as Record<string, unknown>).buildDiscrepancyRows as
+      | ((expectations: Array<{ productId: string; expectedStoreQty: number }>, actuals: Array<{ productId: string; _sum: { quantity: number | null } }>, sessionId: string) => unknown[])
+      | undefined;
+
+    expect(typeof buildDiscrepancyRows).toBe("function");
+    expect(buildDiscrepancyRows?.(
+      [
+        { productId: "short-product", expectedStoreQty: 10 },
+        { productId: "over-product", expectedStoreQty: 5 },
+      ],
+      [
+        { productId: "short-product", _sum: { quantity: 7 } },
+        { productId: "over-product", _sum: { quantity: 9 } },
+        { productId: "unexpected-product", _sum: { quantity: 2 } },
+      ],
+      "session-a",
+    )).toEqual([
+      { sessionId: "session-a", productId: "over-product", expectedStoreQty: 5, actualStoreQty: 9, difference: 4 },
+      { sessionId: "session-a", productId: "short-product", expectedStoreQty: 10, actualStoreQty: 7, difference: -3 },
+      { sessionId: "session-a", productId: "unexpected-product", expectedStoreQty: 0, actualStoreQty: 2, difference: 2 },
+    ]);
   });
 });

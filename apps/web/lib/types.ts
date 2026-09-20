@@ -9,6 +9,7 @@ export interface User {
   employeeNumber?: string | null;
   jobTitle?: JobTitle | null;
   taskManager?: boolean;
+  mfaEnabled?: boolean;
 }
 
 export type BarcodeSymbology = "EAN13" | "UPCA" | "CODE128" | "QR" | "DATA_MATRIX" | "OTHER";
@@ -118,6 +119,18 @@ export interface Item {
   movements?: StockMovement[];
   maintenanceRecords?: MaintenanceRecord[];
 }
+
+export type InventoryStockSite = { id: string; code: string; name: string };
+export type InventoryStockStateRow = {
+  product: { id: string; barcodeValue: string | null; name: string; manufacturer: string | null; packageSize: string | null };
+  onHand: string;
+  // Application-server ledger createdAt cutoff, shared by rows on this page;
+  // includes only committed rows visible to that read, not a commit watermark.
+  asOf: string;
+  committed: { status: "notTracked" };
+  incoming: { status: "notTracked" };
+};
+export type InventoryStockState = { rows: InventoryStockStateRow[]; nextCursor: string | null };
 
 export interface ProductLookupPreview {
   found: boolean;
@@ -265,6 +278,23 @@ export interface TeamWorkResponse {
   date: string;
   site: TaskSite;
   assignments: TaskAssignment[];
+  activeCounts: TeamActiveCount[];
+}
+
+export interface TeamActiveCount {
+  id: string;
+  name?: string | null;
+  startedAt: string;
+  assignedToId?: string | null;
+  assignedTo?: Pick<User, "id" | "name" | "employeeNumber"> | null;
+  assignmentEvents: Array<{
+    id: string;
+    fromUser?: Pick<User, "id" | "name"> | null;
+    toUser: Pick<User, "id" | "name">;
+    assignedBy: Pick<User, "id" | "name">;
+    reason?: string | null;
+    occurredAt: string;
+  }>;
 }
 
 export interface TaskReportResponse {

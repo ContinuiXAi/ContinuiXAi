@@ -64,6 +64,8 @@ jobs:
           labels: ${{ steps.meta_api.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          build-args: |
+            BUILD_SHA=${{ github.sha }}
 
       - name: Build and push Web image
         uses: docker/build-push-action@v7
@@ -73,6 +75,7 @@ jobs:
           push: true
           build-args: |
             NEXT_PUBLIC_API_URL=
+            NEXT_PUBLIC_BUILD_SHA=${{ github.sha }}
           tags: ${{ steps.meta_web.outputs.tags }}
           labels: ${{ steps.meta_web.outputs.labels }}
           cache-from: type=gha

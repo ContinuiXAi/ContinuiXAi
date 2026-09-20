@@ -11,7 +11,9 @@ FROM deps AS build
 COPY . .
 RUN npm run build -w packages/shared
 ARG NEXT_PUBLIC_API_URL=""
+ARG NEXT_PUBLIC_BUILD_SHA="unknown"
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_BUILD_SHA=$NEXT_PUBLIC_BUILD_SHA
 RUN npm run build -w apps/web
 
 FROM base AS runner

@@ -73,5 +73,15 @@ describe("official ContinuiXai brand standard", () => {
     expect(css).toContain("--brand-navy: #16235a;");
     expect(css).toContain("--brand-teal: #18b5c9;");
     expect(css).toContain("--brand-amber: #f5a623;");
+
+    // The visible "ContinuiXai" wordmark reads through the same adaptive
+    // --color-text token the rest of the UI uses (e.g. the "Sign In"
+    // heading), instead of a fixed navy/teal pinned per color scheme. A
+    // fixed navy was unreadable against a dark background; --color-text
+    // already flips light/dark automatically, so the name always meets
+    // contrast without a separate media-query override to keep in sync.
+    expect(css).toMatch(/\.brand-lockup__name\s*\{[^}]*color:\s*var\(--color-text\)/);
+    const globals = source("app/globals.css");
+    expect(globals).toContain("--color-text");
   });
 });

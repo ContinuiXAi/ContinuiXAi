@@ -452,6 +452,12 @@ const dict = {
   usersTitle: { ko: "가족 구성원 계정", en: "Family accounts" },
   roleGeneral: { ko: "일반", en: "General" },
   roleAdmin: { ko: "관리자", en: "Admin" },
+  organizationLabel: { ko: "조직", en: "Organization" },
+  selectOrganization: { ko: "조직 선택", en: "Select organization" },
+  organizationLoadFailed: {
+    ko: "사용 가능한 조직을 불러오지 못했습니다. 페이지를 새로고침한 후 다시 시도하세요.",
+    en: "Couldn't load available organizations. Refresh the page and try again.",
+  },
   createAccountButton: { ko: "계정 만들기", en: "Create account" },
   accountCreatedToast: { ko: "계정이 생성되었습니다", en: "Account created" },
   confirmDeleteAccount: { ko: "이 계정을 삭제할까요?", en: "Delete this account?" },
