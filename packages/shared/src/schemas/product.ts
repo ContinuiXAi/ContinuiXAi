@@ -8,6 +8,10 @@ export const productInputSchema = z.object({
   packageSize: z.string().trim().max(120).nullable().optional(),
   imageUrl: z.string().trim().max(2000).nullable().optional(),
   categoryId: z.string().nullable().optional(),
+  // Cycle-count MVP: ABC classification. Nullable/optional — an unclassified
+  // product is simply excluded from any class-scoped cycle count (never from
+  // a full, unscoped one). Set via the existing PATCH /api/products/:id.
+  cycleCountClass: z.enum(["A", "B", "C"]).nullable().optional(),
   isActive: z.boolean().optional(),
 });
 export type ProductInput = z.infer<typeof productInputSchema>;

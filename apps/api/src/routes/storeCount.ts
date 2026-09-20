@@ -9,9 +9,16 @@ import { matchExistingCategory } from "../lib/barcodeLookup/categoryMatch.js";
 import { ensurePilotSiteForUser } from "../lib/pilotSite.js";
 import { assignedCountWhere, countWriteError, hasRequiredCountObservations, isCurrentCountAssignee, lockCountLocation, lockCountProduct, lockCountScope, requireCountWriter } from "../lib/storeCountWriteAccess.js";
 
+// Cycle-count MVP: when set, the session expects/routes only that ABC class
+// of product at the site instead of the full catalog. Omitted (undefined) ==
+// the original full-site count, byte-for-byte unchanged from before this field
+// existed — see the /sessions handler.
+const cycleCountClassSchema = z.enum(["A", "B", "C"]);
+
 const createSessionSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
   siteId: z.string().trim().min(1).optional(),
+  cycleCountClass: cycleCountClassSchema.optional(),
 });
 
 const scanSchema = z.object({
@@ -420,17 +427,37 @@ export async function storeCountRoutes(app: FastifyInstance) {
       const lockedSite = authorizedSites[0];
       if (!lockedSite) return { status: "forbidden" as const };
 
+      // One physical person can only be doing one count at a time: if this user
+      // already has ANY active session at this site — full or class-scoped —
+      // resume it, exactly as before cycleCountClass existed. Only a genuinely
+      // new session reaches the cross-user class freeze below.
       const existing = await tx.storeCountSession.findFirst({
         where: { status: "ACTIVE", ...assignedCountWhere(userId), siteId: lockedSite.id },
         orderBy: { startedAt: "desc" },
       });
       if (existing) return { status: "ok" as const, created: false, session: existing };
+
+      const cycleCountClass = parsed.data.cycleCountClass ?? null;
+      if (cycleCountClass) {
+        // Cycle-count freeze: at most one ACTIVE session per site per class,
+        // across every user — stops two employees from double-counting the
+        // same scheduled partial count. Scoped lock (not the per-user one
+        // above) so concurrent requests from different users serialize here.
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`cycle-count-class:${lockedSite.id}:${cycleCountClass}`}))`;
+        const conflicting = await tx.storeCountSession.findFirst({
+          where: { status: "ACTIVE", siteId: lockedSite.id, cycleCountClass },
+          select: { id: true },
+        });
+        if (conflicting) return { status: "class-locked" as const };
+      }
+
       const session = await tx.storeCountSession.create({
         data: {
           name: parsed.data.name ?? null,
           startedById: userId,
           assignedToId: userId,
           siteId: lockedSite.id,
+          cycleCountClass,
         },
       });
       await tx.storeCountAssignmentEvent.create({
@@ -447,7 +474,10 @@ export async function storeCountRoutes(app: FastifyInstance) {
         where: {
           organizationId: lockedSite.organizationId,
           siteId: lockedSite.id,
-          product: { organizationId: lockedSite.organizationId },
+          product: {
+            organizationId: lockedSite.organizationId,
+            ...(cycleCountClass ? { cycleCountClass } : {}),
+          },
         },
         _sum: { quantity: true },
         orderBy: { productId: "asc" },
@@ -462,7 +492,11 @@ export async function storeCountRoutes(app: FastifyInstance) {
           organizationId: lockedSite.organizationId,
           siteId: lockedSite.id,
           location: { siteId: lockedSite.id, isActive: true },
-          product: { organizationId: lockedSite.organizationId, isActive: true },
+          product: {
+            organizationId: lockedSite.organizationId,
+            isActive: true,
+            ...(cycleCountClass ? { cycleCountClass } : {}),
+          },
         },
         select: {
           productId: true,
@@ -488,6 +522,9 @@ export async function storeCountRoutes(app: FastifyInstance) {
 
     if (result.status === "forbidden") {
       return reply.code(403).send({ error: "you do not have access to that site" });
+    }
+    if (result.status === "class-locked") {
+      return reply.code(409).send({ error: "a cycle count for this class is already in progress at this site" });
     }
     return reply.code(result.created ? 201 : 200).send(result.session);
   });

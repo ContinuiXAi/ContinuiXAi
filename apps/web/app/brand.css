@@ -23,7 +23,10 @@
 }
 
 .brand-lockup__name {
-  color: var(--brand-navy);
+  /* Match the same adaptive color body text (e.g. "Sign In") already uses,
+     instead of the fixed brand navy — the navy was unreadable against a
+     dark background. --color-text already flips light/dark automatically. */
+  color: var(--color-text);
   font-size: 25px;
   line-height: 1.1;
   font-weight: 800;
@@ -55,16 +58,3 @@
   display: none;
 }
 
-@media (prefers-color-scheme: dark) {
-  .brand-lockup__name {
-    color: var(--brand-teal);
-  }
-}
-
-[data-theme="dark"] .brand-lockup__name {
-  color: var(--brand-teal);
-}
-
-[data-theme="light"] .brand-lockup__name {
-  color: var(--brand-navy);
-}

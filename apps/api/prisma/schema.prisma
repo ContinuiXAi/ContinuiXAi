@@ -567,6 +567,16 @@ model StoreLocation {
   @@index([siteId, isActive, sortOrder])
 }
 
+// Cycle-count MVP (see 2026-09-19 competitor research, P1): ABC classification
+// drives which subset of products a scoped StoreCountSession expects and
+// routes to. Nullable and unset by default — a product with no class is simply
+// excluded from any class-scoped cycle count (never from a full, unscoped count).
+enum ProductCycleCountClass {
+  A
+  B
+  C
+}
+
 model Product {
   id             String   @id @default(cuid())
   organizationId String?
@@ -577,6 +587,7 @@ model Product {
   packageSize    String?
   imageUrl       String?
   categoryId     String?
+  cycleCountClass ProductCycleCountClass?
   isActive       Boolean  @default(true)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
@@ -598,6 +609,7 @@ model Product {
   @@index([isActive])
   @@index([organizationId, isActive])
   @@index([categoryId])
+  @@index([organizationId, cycleCountClass])
 }
 
 model ProductPackaging {
@@ -660,6 +672,9 @@ model StoreCountSession {
   startedAt    DateTime                @default(now())
   completedAt  DateTime?
   routeSnapshot Json @default("[]")
+  // Null = full-site count (original, unscoped behavior — unchanged). Set =
+  // this session expects/routes only products of that ABC class at the site.
+  cycleCountClass ProductCycleCountClass?
   updatedAt    DateTime                @updatedAt
 
   site             Site?                       @relation(fields: [siteId], references: [id], onDelete: Restrict)
@@ -671,10 +686,16 @@ model StoreCountSession {
   assignmentEvents StoreCountAssignmentEvent[]
   discrepancies    StoreCountDiscrepancy[]
 
+  // The cycle-count freeze (at most one ACTIVE session per site per class) is
+  // enforced in the /sessions handler via the same advisory-lock-then-recheck
+  // pattern already used for the per-user idempotent-session lookup below,
+  // not a DB constraint — consistent with how this file guards every other
+  // count-session invariant (see resolveAuthorizedSite / lockCountScope).
   @@index([siteId, status, startedAt])
   @@index([startedById, status])
   @@index([assignedToId, status])
   @@index([status, startedAt])
+  @@index([siteId, cycleCountClass, status])
 }
 
 model StoreCountEntry {

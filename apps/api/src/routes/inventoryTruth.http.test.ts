@@ -297,6 +297,7 @@ describe("inventory truth HTTP routes", () => {
         startedById: "user-a",
         assignedToId: "user-a",
         siteId: "site-a",
+        cycleCountClass: null,
       },
     });
     expect(mocks.transactionAssignmentCreate).toHaveBeenCalledWith({
@@ -348,6 +349,80 @@ describe("inventory truth HTTP routes", () => {
         { sessionId: "session-a", locationId: "back" },
       ],
     });
+    await app.close();
+  });
+
+  it("scopes expectations and required-location hints to the requested cycle-count class, and records it on the session", async () => {
+    const app = await testApp();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/store-count/sessions",
+      payload: { siteId: "site-a", cycleCountClass: "A" },
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(mocks.transactionSessionCreate).toHaveBeenCalledWith({
+      data: {
+        name: null,
+        startedById: "user-a",
+        assignedToId: "user-a",
+        siteId: "site-a",
+        cycleCountClass: "A",
+      },
+    });
+    expect(mocks.transactionInventoryGroupBy).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        organizationId: "org-a",
+        siteId: "site-a",
+        product: { organizationId: "org-a", cycleCountClass: "A" },
+      },
+    }));
+    expect(mocks.transactionHintFindMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        organizationId: "org-a",
+        siteId: "site-a",
+        location: { siteId: "site-a", isActive: true },
+        product: { organizationId: "org-a", isActive: true, cycleCountClass: "A" },
+      },
+    }));
+    await app.close();
+  });
+
+  it("rejects starting a cycle count for a class another user already has active at the site", async () => {
+    mocks.transactionSessionFindFirst.mockImplementation(async (args: { where: Record<string, unknown> }) =>
+      args.where.OR ? null : { id: "session-other-user", siteId: "site-a", cycleCountClass: "A", status: "ACTIVE" },
+    );
+    const app = await testApp("GENERAL", "user-b");
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/store-count/sessions",
+      payload: { siteId: "site-a", cycleCountClass: "A" },
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(mocks.transactionSessionCreate).not.toHaveBeenCalled();
+    expect(mocks.transactionInventoryGroupBy).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("does not freeze a full (unscoped) count against an active class-scoped count at the same site", async () => {
+    mocks.transactionSessionFindFirst.mockImplementation(async (args: { where: Record<string, unknown> }) =>
+      args.where.OR ? null : { id: "session-other-user", siteId: "site-a", cycleCountClass: "A", status: "ACTIVE" },
+    );
+    const app = await testApp("GENERAL", "user-b");
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/store-count/sessions",
+      payload: { siteId: "site-a" },
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(mocks.transactionSessionCreate).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ cycleCountClass: null }),
+    }));
     await app.close();
   });
 

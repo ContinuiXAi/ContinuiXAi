@@ -35,16 +35,25 @@ describe("MFA helpers", () => {
     expect(findTotpCounter(secret, "000000", 59_000)).toBeNull();
   });
 
-  it("makes backup codes single-use", async () => {
-    const codes = generateBackupCodes();
-    expect(codes).toHaveLength(8);
-    const hashes = await hashBackupCodes(codes);
-    const first = await consumeBackupCode(codes[0], hashes);
-    expect(first.valid).toBe(true);
-    expect(first.remaining).toHaveLength(7);
-    const second = await consumeBackupCode(codes[0], first.remaining);
-    expect(second.valid).toBe(false);
-  });
+  it(
+    "makes backup codes single-use",
+    async () => {
+      const codes = generateBackupCodes();
+      expect(codes).toHaveLength(8);
+      const hashes = await hashBackupCodes(codes);
+      const first = await consumeBackupCode(codes[0], hashes);
+      expect(first.valid).toBe(true);
+      expect(first.remaining).toHaveLength(7);
+      const second = await consumeBackupCode(codes[0], first.remaining);
+      expect(second.valid).toBe(false);
+    },
+    // bcryptjs is a pure-JS (no native bindings) cost-10 implementation, and this
+    // test does 8 real hashes plus up to 15 real compares. That genuine CPU work
+    // can cross vitest's 5000ms default under parallel test-worker load even
+    // though nothing here is actually hung — give it real headroom instead of
+    // weakening the cost factor the app also uses in production.
+    15_000,
+  );
 
   it("rejects a missing or shared MFA encryption key in production", () => {
     const previous = { nodeEnv: process.env.NODE_ENV, mfa: process.env.MFA_ENCRYPTION_KEY, jwt: process.env.JWT_SECRET };
