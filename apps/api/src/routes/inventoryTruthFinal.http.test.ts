@@ -38,6 +38,7 @@ let liveHints: ReturnType<typeof hint>[];
 let createdSessions: Session[];
 let assignmentEvents: Array<{ sessionId: string; fromUserId: string | null; toUserId: string; assignedById: string }>;
 let reassignmentConflict: "active-assignee-adapter" | "active-assignee-target" | "other-unique" | null;
+let authorizationLockOrder: string[];
 
 async function inject(operation: string, who = "a", barcode = "component-upc") {
   actor = who;
@@ -73,6 +74,7 @@ beforeEach(() => {
   logs = []; authorized = true; verified = false; approved = false; currentProduct = product; actorRole = "INVENTORY"; liveHints = [...session.routeSnapshot]; createdSessions = [];
   assignmentEvents = [{ sessionId: session.id, fromUserId: null, toUserId: "a", assignedById: "a" }];
   reassignmentConflict = null;
+  authorizationLockOrder = [];
   mocks.beforeTransaction = () => {};
   const scope = () => ({ ...session, organizationId: "org", organizationRole: actorRole, startedAt: new Date(0), visitStatus: verified ? "VERIFIED" : "PENDING" });
   const observed = () => session.routeSnapshot.every((h) => entries.some((e) => e.productId === h.productId && e.locationId === h.locationId));
@@ -86,8 +88,11 @@ beforeEach(() => {
         return [scope()];
       }
       if (sql.includes('FROM "StoreCountDiscrepancy"')) return approved ? [{ status: "APPROVED" }] : [];
-      if (sql.includes('FROM "User"')) return authorized ? [{ id: actor }] : [];
-      if (sql.includes('FROM "Site"')) return sql.includes('actor."isActive"') && !authorized ? [] : [{ id: "site", organizationId: "org" }];
+      if (sql.includes('FROM "User"')) { authorizationLockOrder.push("user"); return authorized ? [{ id: actor, role: "GENERAL", isActive: true }] : []; }
+      if (sql.includes('FROM "Organization"')) { authorizationLockOrder.push("organization"); return authorized ? [{ id: "org" }] : []; }
+      if (sql.includes('FROM "OrganizationMembership"')) { authorizationLockOrder.push("organization-membership"); return authorized ? [{ organizationId: "org", role: actorRole }] : []; }
+      if (sql.includes('FROM "SiteMembership"')) { authorizationLockOrder.push("site-membership"); return authorized ? [{ siteId: "site" }] : []; }
+      if (sql.includes('FROM "Site"')) { authorizationLockOrder.push("site"); return sql.includes('actor."isActive"') && !authorized ? [] : [{ id: "site", organizationId: "org" }]; }
       if (sql.includes('FROM "StoreLocation"')) return [location];
       if (sql.includes('FROM "ProductComposition"')) return currentProduct.id === "parent" ? [{ id: "recipe" }] : [];
       if (sql.includes('FROM "Product"')) return [currentProduct];
@@ -101,7 +106,7 @@ beforeEach(() => {
       throw new Error(sql);
     },
     $executeRaw: async () => 1,
-    site: { findMany: async () => [{ id: "site", organizationId: "org" }], findUnique: async () => ({ organizationId: "org" }) },
+    site: { findMany: async () => [{ id: "site", organizationId: "org" }], findFirst: async () => ({ id: "site", organizationId: "org" }), findUnique: async () => ({ organizationId: "org" }) },
     storeLocation: { findUnique: async () => location, findFirst: async () => location },
     product: { findFirst: async ({ where }: { where: { barcodeValue: string } }) => where.barcodeValue === currentProduct.barcodeValue ? currentProduct : null },
     productIdentifier: { findFirst: async ({ where }: { where: { value: string } }) => where.value === "display-alias" && currentProduct.id === "parent" ? { product: currentProduct } : null },
@@ -220,6 +225,18 @@ describe("whole-branch count counterexamples", () => {
   it("rechecks active actor at the session-start write boundary", async () => {
     mocks.beforeTransaction = () => { authorized = false; };
     expect((await inject("start")).statusCode).toBe(403);
+  });
+  it("locks session-start authorization in one global relation order", async () => {
+    session.assignedToId = "b";
+    const response = await inject("start", "a");
+    expect(response.statusCode).toBe(201);
+    expect(authorizationLockOrder.slice(0, 5)).toEqual([
+      "organization",
+      "user",
+      "organization-membership",
+      "site",
+      "site-membership",
+    ]);
   });
   it("lets starter A begin new site work after the active count is handed to B", async () => {
     session.assignedToId = "b";

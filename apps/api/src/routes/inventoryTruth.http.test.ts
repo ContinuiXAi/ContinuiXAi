@@ -104,6 +104,15 @@ function normalizedSql(strings: TemplateStringsArray): string {
   return strings.join(" ").replace(/\s+/g, " ").trim();
 }
 
+function countAuthorizationRow(sql: string, role = "MANAGER") {
+  if (sql.includes('FROM "User"')) return [{ id: "actor", role: "GENERAL", isActive: true }];
+  if (sql.includes('FROM "OrganizationMembership"')) return [{ organizationId: "org-a", role }];
+  if (sql.includes('FROM "Organization"')) return [{ id: "org-a" }];
+  if (sql.includes('FROM "SiteMembership"')) return [{ siteId: "site-a" }];
+  if (sql.includes('FROM "Site"')) return [activeSite];
+  return null;
+}
+
 function hasExactJoin(sql: string, table: string, alias: string, condition: string): boolean {
   const marker = `INNER JOIN "${table}" AS ${alias} ON `;
   const start = sql.indexOf(marker);
@@ -234,7 +243,16 @@ describe("inventory truth HTTP routes", () => {
       storeCountAssignmentEvent: { create: mocks.transactionAssignmentCreate },
     }));
     mocks.transactionExecuteRaw.mockResolvedValue(1);
-    mocks.transactionQueryRaw.mockResolvedValue([activeSite]);
+    mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const sql = normalizedSql(strings);
+      if (sql.includes('FROM "StoreCountSession"')) return [{ ...lockedCount, startedAt: new Date(0) }];
+      if (sql.includes('FROM "User"')) return [{ id: "user-a", role: "GENERAL", isActive: true }];
+      if (sql.includes('FROM "OrganizationMembership"')) return [{ organizationId: "org-a", role: "MANAGER" }];
+      if (sql.includes('FROM "Organization"')) return [{ id: "org-a" }];
+      if (sql.includes('FROM "SiteMembership"')) return [{ siteId: "site-a" }];
+      if (sql.includes('FROM "Site"')) return [activeSite];
+      return [activeSite];
+    });
     mocks.transactionSessionFindFirst.mockResolvedValue(null);
     mocks.transactionSessionCreate.mockResolvedValue(createdSession);
     mocks.transactionSessionUpdate.mockResolvedValue(createdSession);
@@ -667,12 +685,16 @@ describe("inventory truth HTTP routes", () => {
 
     expect(response.statusCode).toBe(201);
     expect(mocks.transaction).toHaveBeenCalledTimes(1);
-    expect(mocks.transactionQueryRaw).toHaveBeenCalledTimes(1);
-    const [authorizationSql, ...authorizationValues] = mocks.transactionQueryRaw.mock.calls[0];
-    expect(authorizationSql.join(" ")).toMatch(/SiteMembership/);
-    expect(authorizationSql.join(" ")).toMatch(/OrganizationMembership/);
-    expect(authorizationSql.join(" ")).toMatch(/FOR UPDATE/);
-    expect(authorizationValues).toEqual(["user-a", "site-a", "user-a"]);
+    expect(mocks.transactionQueryRaw).toHaveBeenCalledTimes(5);
+    const authorizationSql = mocks.transactionQueryRaw.mock.calls.map(([parts]) => normalizedSql(parts));
+    expect(authorizationSql.every((sql) => sql.includes("FOR UPDATE"))).toBe(true);
+    expect(authorizationSql).toEqual([
+      expect.stringContaining('FROM "Organization"'),
+      expect.stringContaining('FROM "User"'),
+      expect.stringContaining('FROM "OrganizationMembership"'),
+      expect.stringContaining('FROM "Site"'),
+      expect.stringContaining('FROM "SiteMembership"'),
+    ]);
     expect(mocks.hintUpsert).toHaveBeenCalledWith({
       where: { siteId_productId_locationId: { siteId: "site-a", productId: "product-a", locationId: "shelf" } },
       update: { evidence: "ASSIGNED", isRequired: true, lastObservedAt: expect.any(Date) },
@@ -686,6 +708,51 @@ describe("inventory truth HTTP routes", () => {
         lastObservedAt: expect.any(Date),
       },
     });
+    await app.close();
+  });
+
+  it("locks location-hint authorization in the global relation order", async () => {
+    const lockOrder: string[] = [];
+    mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const sql = normalizedSql(strings);
+      if (sql.includes('FROM "User"')) {
+        lockOrder.push("user");
+        return [{ id: "user-a", role: "GENERAL", isActive: true }];
+      }
+      if (sql.includes('FROM "OrganizationMembership"')) {
+        lockOrder.push("organization-membership");
+        return [{ organizationId: "org-a", role: "INVENTORY" }];
+      }
+      if (sql.includes('FROM "Organization"')) {
+        lockOrder.push("organization");
+        return [{ id: "org-a" }];
+      }
+      if (sql.includes('FROM "SiteMembership"')) {
+        lockOrder.push("site-membership");
+        return [{ siteId: "site-a" }];
+      }
+      if (sql.includes('FROM "Site"')) {
+        lockOrder.push("site");
+        return [activeSite];
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+    const app = await testApp();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/inventory-truth/products/product-a/location-hints",
+      payload: { siteId: "site-a", locationId: "shelf", evidence: "ASSIGNED", isRequired: true },
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(lockOrder).toEqual([
+      "organization",
+      "user",
+      "organization-membership",
+      "site",
+      "site-membership",
+    ]);
     await app.close();
   });
 
@@ -741,14 +808,20 @@ describe("inventory truth HTTP routes", () => {
   });
 
   it.each([
-    ["inactive site membership", 'site_membership."isActive" = TRUE'],
-    ["inactive organization membership", 'organization_membership."isActive" = TRUE'],
-    ["inactive site", 'site."isActive" = TRUE'],
-    ["inactive organization", 'organization."isActive" = TRUE'],
-  ])("rejects %s before a hint write", async (_case, requiredSql) => {
-    mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray) =>
-      strings.join(" ").includes(requiredSql) ? [] : [activeSite],
-    );
+    ["inactive site membership", 'FROM "SiteMembership"', ["site-a", "user-a"]],
+    ["inactive organization membership", 'FROM "OrganizationMembership"', ["org-a", "user-a"]],
+    ["inactive site", 'FROM "Site"', ["site-a"]],
+    ["inactive organization", 'FROM "Organization"', ["org-a"]],
+  ])("rejects %s before a hint write", async (_case, rejectedLayer, expectedValues) => {
+    mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const sql = normalizedSql(strings);
+      if (sql.includes(rejectedLayer)) {
+        expect(sql).toContain('"isActive" = TRUE');
+        expect(values).toEqual(expectedValues);
+        return [];
+      }
+      return countAuthorizationRow(sql) ?? [activeSite];
+    });
     const app = await testApp();
     const response = await app.inject({
       method: "POST",
@@ -985,13 +1058,16 @@ describe("inventory truth HTTP routes", () => {
     await app.close();
   });
 
-  it("does not expose discrepancies when any organization or site relationship predicate is removed", async () => {
-    mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
-      const fullyScoped = hasExactSessionAuthorization(strings, values, {
-        sessionId: "session-in-site-b",
-        userId: "user-a",
-      });
-      return fullyScoped ? [] : [{ ...lockedCount, id: "session-in-site-b", siteId: "site-b", organizationId: "org-b" }];
+  it.each(["organization", "user", "organization-membership", "site", "site-membership"])("does not expose discrepancies when %s authorization is inactive", async (missing) => {
+    mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const sql = normalizedSql(strings);
+      if (sql.includes('FROM "StoreCountSession"')) return [{ ...lockedCount, id: "session-in-site-b", siteId: "site-b", organizationId: "org-b", startedAt: new Date(0) }];
+      if (sql.includes('FROM "OrganizationMembership"')) return missing === "organization-membership" ? [] : [{ organizationId: "org-b", role: "MANAGER" }];
+      if (sql.includes('FROM "Organization"')) return missing === "organization" ? [] : [{ id: "org-b" }];
+      if (sql.includes('FROM "User"')) return missing === "user" ? [] : [{ id: "user-a", role: "GENERAL", isActive: true }];
+      if (sql.includes('FROM "SiteMembership"')) return missing === "site-membership" ? [] : [{ siteId: "site-b" }];
+      if (sql.includes('FROM "Site"')) return missing === "site" ? [] : [{ id: "site-b", organizationId: "org-b" }];
+      return [];
     });
     const app = await testApp();
 
@@ -1003,6 +1079,49 @@ describe("inventory truth HTTP routes", () => {
     expect(response.statusCode).toBe(404);
     expect(mocks.transactionDiscrepancyFindMany).not.toHaveBeenCalled();
     expect(mocks.transactionDiscrepancyUpsert).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("does not expose discrepancies to an inactive user with still-active memberships", async () => {
+    mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const sql = normalizedSql(strings);
+      if (sql.includes('FROM "StoreCountSession"')) return [{ ...lockedCount, startedAt: new Date(0) }];
+      if (sql.includes('FROM "Organization"')) return [{ id: "org-a" }];
+      if (sql.includes('FROM "User"')) return [];
+      throw new Error(`authorization continued after inactive actor: ${sql}`);
+    });
+    const app = await testApp();
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/inventory-truth/counts/session-a/discrepancies",
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(mocks.transactionDiscrepancyFindMany).not.toHaveBeenCalled();
+    expect(mocks.transactionDiscrepancyUpsert).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("holds the complete discrepancy authorization scope in the established lock order", async () => {
+    const lockOrder: string[] = [];
+    mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const sql = normalizedSql(strings);
+      if (sql.includes('FROM "StoreCountSession"')) { lockOrder.push("session"); return [{ ...lockedCount, startedAt: new Date(0) }]; }
+      if (sql.includes('FROM "OrganizationMembership"')) { lockOrder.push("organization-membership"); return [{ organizationId: "org-a", role: "MANAGER" }]; }
+      if (sql.includes('FROM "Organization"')) { lockOrder.push("organization"); return [{ id: "org-a" }]; }
+      if (sql.includes('FROM "User"')) { lockOrder.push("user"); return [{ id: "user-a", role: "GENERAL", isActive: true }]; }
+      if (sql.includes('FROM "SiteMembership"')) { lockOrder.push("site-membership"); return [{ siteId: "site-a" }]; }
+      if (sql.includes('FROM "Site"')) { lockOrder.push("site"); return [activeSite]; }
+      return [];
+    });
+    mocks.transactionVisitCount.mockResolvedValue(1);
+    const app = await testApp();
+
+    const response = await app.inject({ method: "GET", url: "/api/inventory-truth/counts/session-a/discrepancies" });
+
+    expect(response.statusCode).toBe(200);
+    expect(lockOrder).toEqual(["session", "organization", "user", "organization-membership", "site", "site-membership"]);
     await app.close();
   });
 
@@ -1300,6 +1419,11 @@ describe("inventory truth HTTP routes", () => {
         $queryRaw: vi.fn(async (strings: TemplateStringsArray) => {
           const sql = normalizedSql(strings);
           if (sql.includes("missing_observation")) return [];
+          if (sql.includes('FROM "User"')) return [{ id: "actor", role: "GENERAL", isActive: true }];
+          if (sql.includes('FROM "Organization"')) return [{ id: "org-a" }];
+          if (sql.includes('FROM "OrganizationMembership"')) return [{ organizationId: "org-a", role: "MANAGER" }];
+          if (sql.includes('FROM "SiteMembership"')) return [{ siteId: "site-a" }];
+          if (sql.includes('FROM "Site"')) return [{ id: "site-a", organizationId: "org-a" }];
           if (!sql.includes('FROM "StoreCountSession" AS session')) return [activeSite];
           return [{
             ...lockedCount,
@@ -1308,6 +1432,7 @@ describe("inventory truth HTTP routes", () => {
             organizationRole: "MANAGER",
           }];
         }),
+        site: { findFirst: vi.fn(async () => ({ id: "site-a", organizationId: "org-a" })) },
         storeCountSession: {
           findFirst: vi.fn(async () => null),
           create: vi.fn(async (args: { data: Record<string, unknown> }) => {
@@ -1460,9 +1585,6 @@ describe("inventory truth HTTP routes", () => {
     let status = "ACTIVE";
     let writes = 0;
     let lockTail = Promise.resolve();
-    let unlockedReads = 0;
-    let releaseUnlockedReads!: () => void;
-    const bothUnlockedReads = new Promise<void>((resolve) => { releaseUnlockedReads = resolve; });
     mocks.transaction.mockImplementation(async (work: (tx: Record<string, unknown>) => unknown) => {
       let releaseLock: (() => void) | undefined;
       const tx = {
@@ -1475,11 +1597,9 @@ describe("inventory truth HTTP routes", () => {
             await prior;
             return [{ ...lockedCount, status, assignedToId: "user-b" }];
           }
-          const snapshot = status;
-          unlockedReads += 1;
-          if (unlockedReads === 2) releaseUnlockedReads();
-          await bothUnlockedReads;
-          return [{ ...lockedCount, status: snapshot, assignedToId: "user-b" }];
+          const access = countAuthorizationRow(normalizedSql(strings));
+          if (access) return access;
+          return [{ ...lockedCount, status, assignedToId: "user-b" }];
         }),
         storeCountLocationVisit: { count: vi.fn(async () => 0) },
         storeCountExpectation: { findMany: vi.fn(async () => []) },
@@ -1521,9 +1641,6 @@ describe("inventory truth HTTP routes", () => {
     let completionWrites = 0;
     let entryWrites = 0;
     let lockTail = Promise.resolve();
-    let unlockedReads = 0;
-    let releaseUnlockedReads!: () => void;
-    const bothUnlockedReads = new Promise<void>((resolve) => { releaseUnlockedReads = resolve; });
     mocks.transaction.mockImplementation(async (work: (tx: Record<string, unknown>) => unknown) => {
       let releaseLock: (() => void) | undefined;
       const tx = {
@@ -1536,11 +1653,9 @@ describe("inventory truth HTTP routes", () => {
             await prior;
             return [{ ...lockedCount, status }];
           }
-          const snapshot = status;
-          unlockedReads += 1;
-          if (unlockedReads === 2) releaseUnlockedReads();
-          await bothUnlockedReads;
-          return [{ ...lockedCount, status: snapshot }];
+          const access = countAuthorizationRow(normalizedSql(strings));
+          if (access) return access;
+          return [{ ...lockedCount, status }];
         }),
         storeCountLocationVisit: { count: vi.fn(async () => 0) },
         storeCountExpectation: { findMany: vi.fn(async () => []) },
@@ -1587,7 +1702,10 @@ describe("inventory truth HTTP routes", () => {
   });
 
   it("reassigns an active count atomically for a scoped organization manager without changing progress", async () => {
-    mocks.transactionQueryRaw.mockResolvedValue([{ ...lockedCount, organizationRole: "MANAGER" }]);
+    mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const access = countAuthorizationRow(normalizedSql(strings));
+      return access ?? [{ ...lockedCount, organizationRole: "MANAGER" }];
+    });
     mocks.transactionOrganizationMembershipFindFirst.mockImplementation(async (args: { where: Record<string, unknown> }) => {
       expect(args.where).toEqual({
         organizationId: "org-a",
@@ -1659,7 +1777,10 @@ describe("inventory truth HTTP routes", () => {
     ["cross-tenant", (where: Record<string, unknown>) => where.organizationId === "org-a"],
     ["cross-site", (where: Record<string, unknown>) => JSON.stringify(where).includes('"siteId":"site-a"')],
   ])("rejects a %s reassignment recipient only when the recipient query keeps its scope", async (_case, hasScope) => {
-    mocks.transactionQueryRaw.mockResolvedValue([{ ...lockedCount, organizationRole: "MANAGER" }]);
+    mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const access = countAuthorizationRow(normalizedSql(strings));
+      return access ?? [{ ...lockedCount, organizationRole: "MANAGER" }];
+    });
     mocks.transactionOrganizationMembershipFindFirst.mockImplementation(async (args: { where: Record<string, unknown> }) =>
       hasScope(args.where) ? null : { userId: "foreign-user" },
     );
@@ -1684,7 +1805,10 @@ describe("inventory truth HTTP routes", () => {
       url: "/api/inventory-truth/counts/session-a/reassign",
       payload: { toUserId: "user-b", reason: "x".repeat(501) },
     });
-    mocks.transactionQueryRaw.mockResolvedValue([{ ...lockedCount, status: "COMPLETED", organizationRole: "MANAGER" }]);
+    mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const access = countAuthorizationRow(normalizedSql(strings));
+      return access ?? [{ ...lockedCount, status: "COMPLETED", organizationRole: "MANAGER" }];
+    });
     const completed = await app.inject({
       method: "POST",
       url: "/api/inventory-truth/counts/session-a/reassign",
@@ -1701,9 +1825,6 @@ describe("inventory truth HTTP routes", () => {
   it("serializes two concurrent reassignments into a reconstructable ownership history", async () => {
     let assignedToId = "user-a";
     let lockTail = Promise.resolve();
-    let unlockedReads = 0;
-    let releaseUnlockedReads!: () => void;
-    const bothUnlockedReads = new Promise<void>((resolve) => { releaseUnlockedReads = resolve; });
     const events: Array<{ fromUserId: string | null; toUserId: string }> = [];
     mocks.transaction.mockImplementation(async (work: (tx: Record<string, unknown>) => unknown) => {
       let releaseLock: (() => void) | undefined;
@@ -1717,11 +1838,9 @@ describe("inventory truth HTTP routes", () => {
             await prior;
             return [{ ...lockedCount, assignedToId }];
           }
-          const snapshot = assignedToId;
-          unlockedReads += 1;
-          if (unlockedReads === 2) releaseUnlockedReads();
-          await bothUnlockedReads;
-          return [{ ...lockedCount, assignedToId: snapshot }];
+          const access = countAuthorizationRow(normalizedSql(strings));
+          if (access) return access;
+          return [{ ...lockedCount, assignedToId }];
         }),
         organizationMembership: {
           findFirst: vi.fn(async (args: { where: { userId: string } }) => ({ userId: args.where.userId })),
@@ -1766,9 +1885,6 @@ describe("inventory truth HTTP routes", () => {
     let assignedToId = "user-a";
     let status = "ACTIVE";
     let lockTail = Promise.resolve();
-    let unlockedReads = 0;
-    let releaseUnlockedReads!: () => void;
-    const bothUnlockedReads = new Promise<void>((resolve) => { releaseUnlockedReads = resolve; });
     const events: Array<{ fromUserId: string | null; toUserId: string }> = [];
     let completionWrites = 0;
     let signalReassignLockAttempt!: () => void;
@@ -1778,22 +1894,18 @@ describe("inventory truth HTTP routes", () => {
       let releaseLock: (() => void) | undefined;
       const tx = {
         $queryRaw: vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => {
-          if (normalizedSql(strings).includes('organization_membership."role" IN')) {
-            signalReassignLockAttempt();
-          }
           if (strings.join(" ").includes("missing_observation")) return [];
           if (releaseLock && strings.join(" ").includes('FROM "StoreCountSession"')) return [{ ...lockedCount, assignedToId, status, organizationRole: "MANAGER" }];
           if (locksExactSession(strings, values, "session-a")) {
             const prior = lockTail;
             lockTail = new Promise<void>((resolve) => { releaseLock = resolve; });
             await prior;
+            signalReassignLockAttempt();
             return [{ ...lockedCount, assignedToId, status }];
           }
-          const snapshot = { assignedToId, status };
-          unlockedReads += 1;
-          if (unlockedReads === 2) releaseUnlockedReads();
-          await bothUnlockedReads;
-          return [{ ...lockedCount, ...snapshot }];
+          const access = countAuthorizationRow(normalizedSql(strings));
+          if (access) return access;
+          return [{ ...lockedCount, assignedToId, status }];
         }),
         organizationMembership: {
           findFirst: vi.fn(async (args: { where: { userId: string } }) => ({ userId: args.where.userId })),

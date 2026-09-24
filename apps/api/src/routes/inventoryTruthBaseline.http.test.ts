@@ -35,6 +35,11 @@ beforeEach(() => {
         const sql = parts.join(" ");
         if (sql.includes("missing_observation")) return [];
         if (sql.includes('FROM "StoreCountSession"')) return [{ id: values[0], siteId: "site", organizationId: "org", status: "COMPLETED", assignedToId: "employee", organizationRole: "MANAGER", startedAt: starts.get(String(values[0])) }];
+        if (sql.includes('FROM "User"')) return [{ id: "manager", role: "GENERAL", isActive: true }];
+        if (sql.includes('FROM "OrganizationMembership"')) return [{ organizationId: "org", role: "MANAGER" }];
+        if (sql.includes('FROM "Organization"')) return [{ id: "org" }];
+        if (sql.includes('FROM "SiteMembership"')) return [{ siteId: "site" }];
+        if (sql.includes('FROM "Site"')) return [{ id: "site", organizationId: "org" }];
         if (sql.includes('FROM "StoreCountDiscrepancy"')) return [rows.get(String(values[0]))];
         if (sql.includes('FROM "Product"') && sql.includes("FOR UPDATE")) {
           expect(values).toEqual(["product", "org"]);

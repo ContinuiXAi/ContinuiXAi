@@ -8,6 +8,7 @@ import { resolveProduct } from "../lib/barcodeLookup/index.js";
 import { matchExistingCategory } from "../lib/barcodeLookup/categoryMatch.js";
 import { ensurePilotSiteForUser } from "../lib/pilotSite.js";
 import { assignedCountWhere, countWriteError, hasRequiredCountObservations, isCurrentCountAssignee, lockCountLocation, lockCountProduct, lockCountScope, requireCountWriter } from "../lib/storeCountWriteAccess.js";
+import { lockSiteAndMembership } from "../lib/accessLocking.js";
 
 // Cycle-count MVP: when set, the session expects/routes only that ABC class
 // of product at the site instead of the full catalog. Omitted (undefined) ==
@@ -404,27 +405,7 @@ export async function storeCountRoutes(app: FastifyInstance) {
 
     const result = await prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`store-count:${userId}:${authorizedSite.id}`}))`;
-      const authorizedSites = await tx.$queryRaw<Array<{ id: string; organizationId: string }>>`
-        SELECT site."id", site."organizationId"
-        FROM "Site" AS site
-        INNER JOIN "SiteMembership" AS site_membership
-          ON site_membership."siteId" = site."id"
-        INNER JOIN "Organization" AS organization
-          ON organization."id" = site."organizationId"
-        INNER JOIN "OrganizationMembership" AS organization_membership
-          ON organization_membership."organizationId" = organization."id"
-        INNER JOIN "User" AS actor ON actor."id" = organization_membership."userId"
-        WHERE site."id" = ${authorizedSite.id}
-          AND site_membership."userId" = ${userId}
-          AND site_membership."isActive" = TRUE
-          AND organization_membership."userId" = ${userId}
-          AND organization_membership."isActive" = TRUE
-          AND site."isActive" = TRUE
-          AND organization."isActive" = TRUE
-          AND actor."isActive" = TRUE
-        FOR UPDATE OF site, site_membership, organization, organization_membership, actor
-      `;
-      const lockedSite = authorizedSites[0];
+      const lockedSite = await lockSiteAndMembership(tx, userId, authorizedSite.id, "update");
       if (!lockedSite) return { status: "forbidden" as const };
 
       // One physical person can only be doing one count at a time: if this user

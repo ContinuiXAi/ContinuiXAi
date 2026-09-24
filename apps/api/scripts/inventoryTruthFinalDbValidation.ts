@@ -17,7 +17,8 @@ async function main() {
   assert(url.pathname.endsWith("_ci"), "Database name must end in _ci; independently verify this is not a production tunnel");
   const holder = new pg.Client({ connectionString, application_name: "truth-final-holder" });
   const observer = new pg.Client({ connectionString, application_name: "truth-final-observer" });
-  await holder.connect(); await observer.connect();
+  const revoker = new pg.Client({ connectionString, application_name: "truth-final-revoker" });
+  await holder.connect(); await observer.connect(); await revoker.connect();
   const holderPid = Number((await holder.query("SELECT pg_backend_pid() AS pid")).rows[0].pid);
   const app = Fastify();
   app.decorate("authenticate", async (request) => {
@@ -68,6 +69,7 @@ async function main() {
   const verify = (c: Count, actor = a.id) => send(actor, "POST", `/truth/counts/${c.session.id}/locations/${location.id}/verify`, { offlineQueueFlushed: true });
   const finish = (c: Count, actor = a.id) => send(actor, "POST", `/count/sessions/${c.session.id}/complete`);
   const cancel = (c: Count, actor = a.id) => send(actor, "POST", `/count/sessions/${c.session.id}/cancel`);
+  const discrepancies = (c: Count, actor = a.id) => send(actor, "GET", `/truth/counts/${c.session.id}/discrepancies`);
   const reassign = (c: Count) => send(manager.id, "POST", `/truth/counts/${c.session.id}/reassign`, { toUserId: b.id, reason: "Audited handoff" });
   async function reviewToken(c: Count) {
     const review = await send(manager.id, "GET", `/truth/counts/${c.session.id}/review`);
@@ -92,6 +94,17 @@ async function main() {
       await sleep(10);
     }
     throw new Error(`Did not observe ${expected} blocked count writers; schedule is not proven`);
+  }
+  async function waitForBlockedQuery(fragment: string) {
+    const deadline = Date.now() + 3_000;
+    while (Date.now() < deadline) {
+      const result = await observer.query<{ count: number }>(`SELECT COUNT(*)::int AS count FROM pg_stat_activity
+        WHERE pid <> $1 AND state = 'active' AND query LIKE $2
+          AND cardinality(pg_blocking_pids(pid)) > 0`, [holderPid, `%${fragment}%`]);
+      if (result.rows[0].count > 0) return;
+      await sleep(10);
+    }
+    throw new Error(`Did not observe a blocked ${fragment} query; cross-route schedule is not proven`);
   }
   async function scheduled(c: Count, requests: Array<() => ReturnType<typeof send>>, beforeCommit?: () => Promise<unknown>) {
     await holder.query("BEGIN");
@@ -180,6 +193,31 @@ async function main() {
     const cancellable = await count(await product(), b.id);
     assert.equal((await cancel(cancellable, b.id)).statusCode, 200);
 
+    // Reassignment's recipient User FK lock must not deadlock with a concurrent
+    // location-hint authorization write. Holding Organization SHARE reproduces
+    // the exact midpoint: the real HTTP route must wait on Organization before
+    // it can lock the recipient User, allowing the FK update to finish first.
+    const crossRoute = await count(await product());
+    await holder.query("BEGIN");
+    try {
+      await holder.query('SELECT "id" FROM "Organization" WHERE "id" = $1 FOR SHARE', [org.id]);
+      const hintRequest = send(b.id, "POST", `/truth/products/${crossRoute.item.id}/location-hints`, {
+        siteId: site.id,
+        locationId: location.id,
+        evidence: "ASSIGNED",
+        isRequired: true,
+      });
+      await waitForBlockedQuery('FROM "Organization"');
+      await holder.query('UPDATE "StoreCountSession" SET "assignedToId" = $1 WHERE "id" = $2', [b.id, crossRoute.session.id]);
+      await holder.query("COMMIT");
+      const hintResponse = await hintRequest;
+      assert.equal(hintResponse.statusCode, 201, hintResponse.body);
+    } catch (error) {
+      await holder.query("ROLLBACK");
+      throw error;
+    }
+    assert.equal((await cancel(crossRoute, b.id)).statusCode, 200);
+
     // Reassignment wins before queued former-owner scan obtains its lock.
     const handoff = await count(await product());
     const handoffResults = await scheduled(handoff, [() => reassign(handoff), () => scan(handoff)]);
@@ -265,6 +303,47 @@ async function main() {
       }
     }
 
+    // If revocation commits before the discrepancy request obtains the session
+    // lock, the request must re-check the inactive actor and perform no mutation
+    // or disclosure.
+    const revokeFirst = await count(await product());
+    const beforeRevokeFirst = await prisma.storeCountDiscrepancy.findUniqueOrThrow({ where: { id: revokeFirst.discrepancy.id } });
+    const revokeFirstResult = await scheduled(revokeFirst, [() => discrepancies(revokeFirst)], async () => {
+      await holder.query('UPDATE "User" SET "isActive" = FALSE WHERE "id" = $1', [a.id]);
+    });
+    assert.equal(revokeFirstResult[0].statusCode, 404, revokeFirstResult[0].body);
+    const afterRevokeFirst = await prisma.storeCountDiscrepancy.findUniqueOrThrow({ where: { id: revokeFirst.discrepancy.id } });
+    assert.equal(afterRevokeFirst.updatedAt.getTime(), beforeRevokeFirst.updatedAt.getTime(), "revoked discrepancy request mutated evidence");
+    await prisma.user.update({ where: { id: a.id }, data: { isActive: true } });
+    assert.equal((await cancel(revokeFirst)).statusCode, 200);
+
+    // If the discrepancy request wins, its SHARE authorization locks must hold
+    // a concurrent deactivation until the request commits. Once revocation has
+    // committed, a second request must disclose nothing and mutate nothing.
+    const requestFirst = await count(await product());
+    await holder.query("BEGIN");
+    try {
+      await holder.query('SELECT "id" FROM "StoreCountDiscrepancy" WHERE "id" = $1 FOR UPDATE', [requestFirst.discrepancy.id]);
+      const authorizedRead = discrepancies(requestFirst);
+      await waitForBlockedQuery('StoreCountDiscrepancy');
+      const deactivation = revoker.query('UPDATE "User" SET "isActive" = FALSE WHERE "id" = $1', [a.id]);
+      await waitForBlockedQuery('UPDATE "User"');
+      await holder.query("COMMIT");
+      const authorizedResponse = await authorizedRead;
+      assert.equal(authorizedResponse.statusCode, 200, authorizedResponse.body);
+      await deactivation;
+    } catch (error) {
+      await holder.query("ROLLBACK");
+      throw error;
+    }
+    const afterAuthorizedRead = await prisma.storeCountDiscrepancy.findUniqueOrThrow({ where: { id: requestFirst.discrepancy.id } });
+    const rejectedRead = await discrepancies(requestFirst);
+    assert.equal(rejectedRead.statusCode, 404, rejectedRead.body);
+    const afterRejectedRead = await prisma.storeCountDiscrepancy.findUniqueOrThrow({ where: { id: requestFirst.discrepancy.id } });
+    assert.equal(afterRejectedRead.updatedAt.getTime(), afterAuthorizedRead.updatedAt.getTime(), "post-revocation discrepancy request mutated evidence");
+    await prisma.user.update({ where: { id: a.id }, data: { isActive: true } });
+    assert.equal((await cancel(requestFirst)).statusCode, 200);
+
     // Cancellation obeys the same state transition lock in both real orders.
     for (const first of ["cancel", "finish", "approve"]) {
       const c = await count(await product()); const token = await reviewToken(c);
@@ -280,7 +359,7 @@ async function main() {
     const cancelFirst = await count(await product()); const cancelToken = await reviewToken(cancelFirst);
     assert.deepEqual((await scheduled(cancelFirst, [() => cancel(cancelFirst), () => approve(cancelFirst, cancelToken)])).map((r) => r.statusCode), [200, 409]);
     assert.equal(await prisma.inventoryTransaction.count({ where: { referenceId: cancelFirst.discrepancy.id } }), 0);
-    console.log("Final inventory truth PostgreSQL validation passed: assigned discovery/handoff, real scan-versus-stale-edit conflict, frozen required zero evidence, recipe aliases/versions, all five authority revocations across scan/edit/verify/Finish/Cancel, and both cancellation/Finish/approval lock orders. Fixture evidence retained until disposable database teardown.");
-  } finally { await app.close(); await holder.end(); await observer.end(); await prisma.$disconnect(); }
+    console.log("Final inventory truth PostgreSQL validation passed: assigned discovery/handoff, cross-route reassignment/location-hint lock ordering, real scan-versus-stale-edit conflict, frozen required zero evidence, recipe aliases/versions, all five authority revocations across scan/edit/verify/Finish/Cancel, both discrepancy-read/revocation lock orders with no post-revocation disclosure or mutation, and both cancellation/Finish/approval lock orders. Fixture evidence retained until disposable database teardown.");
+  } finally { await app.close(); await holder.end(); await observer.end(); await revoker.end(); await prisma.$disconnect(); }
 }
 main().catch((error) => { console.error(error); process.exit(1); });

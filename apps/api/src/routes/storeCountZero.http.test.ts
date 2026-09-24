@@ -64,6 +64,11 @@ describe("Store Count confirmed-zero scan entry", () => {
     mocks.queryRaw.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const sql = strings.join(" ");
       if (sql.includes('FROM "StoreCountSession"')) return [{ status: "ACTIVE", siteId: "site-a", organizationId: "org-a", assignedToId: "employee-a", startedById: "employee-a" }];
+      if (sql.includes('FROM "User"')) return [{ id: "employee-a", role: "GENERAL", isActive: true }];
+      if (sql.includes('FROM "OrganizationMembership"')) return [{ organizationId: "org-a", role: "INVENTORY" }];
+      if (sql.includes('FROM "Organization"')) return [{ id: "org-a" }];
+      if (sql.includes('FROM "SiteMembership"')) return [{ siteId: "site-a" }];
+      if (sql.includes('FROM "Site"')) return [{ id: "site-a", organizationId: "org-a" }];
       if (sql.includes('FROM "StoreLocation"') || sql.includes('FROM "Product"')) return [{ id: "valid" }];
       if (sql.includes('FROM "StoreCountDiscrepancy"')) return [];
       if (sql.includes("INSERT INTO \"StoreCountEntry\"")) {
@@ -118,6 +123,11 @@ describe("Store Count confirmed-zero scan entry", () => {
       const sql = strings.join(" ");
       if (sql.includes('FROM "StoreCountDiscrepancy"')) return values[1] === "approved-product" ? [{ status: "APPROVED" }] : [];
       if (sql.includes('FROM "StoreCountSession"')) return [{ status: "ACTIVE", siteId: "site-a", organizationId: "org-a", startedById: "employee-a", assignedToId: "employee-a" }];
+      if (sql.includes('FROM "User"')) return [{ id: "employee-a", role: "GENERAL", isActive: true }];
+      if (sql.includes('FROM "OrganizationMembership"')) return [{ organizationId: "org-a", role: "INVENTORY" }];
+      if (sql.includes('FROM "Organization"')) return [{ id: "org-a" }];
+      if (sql.includes('FROM "SiteMembership"')) return [{ siteId: "site-a" }];
+      if (sql.includes('FROM "Site"')) return [{ id: "site-a", organizationId: "org-a" }];
       if (sql.includes('FROM "StoreLocation"') || sql.includes('FROM "Product"')) return [{ id: "valid" }];
       if (sql.includes('INSERT INTO "StoreCountEntry"')) { entry.productId = String(values[2] ?? entry.productId); entry.quantity += Number(values[5]); return [{ id: entry.id }]; }
       throw new Error(sql);

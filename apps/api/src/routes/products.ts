@@ -4,6 +4,7 @@ import { z } from "zod";
 import { prisma } from "../lib/prisma.js";
 import { isUniqueConstraintError } from "../lib/prismaErrors.js";
 import { resolveOrganizationContext } from "../lib/organizationContext.js";
+import { lockActorOrganizationAccess } from "../lib/accessLocking.js";
 import {
   MAX_INVENTORY_QUANTITY,
   aggregateCompositionDefinition,
@@ -115,19 +116,8 @@ export async function productRoutes(app: FastifyInstance) {
     }
 
     const result = await prisma.$transaction(async (tx) => {
-      const authorizedMemberships = await tx.$queryRaw<Array<{ organizationId: string }>>`
-        SELECT membership."organizationId"
-        FROM "OrganizationMembership" AS membership
-        INNER JOIN "Organization" AS organization
-          ON organization."id" = membership."organizationId"
-        WHERE membership."userId" = ${request.user.sub}
-          AND membership."organizationId" = ${context.organizationId}
-          AND membership."isActive" = TRUE
-          AND membership."role" IN ('OWNER', 'ADMIN', 'MANAGER')
-          AND organization."isActive" = TRUE
-        FOR UPDATE OF membership, organization
-      `;
-      if (authorizedMemberships.length !== 1) return { status: "forbidden" as const };
+      const access = await lockActorOrganizationAccess(tx, request.user.sub, context.organizationId, "update");
+      if (!access || !["OWNER", "ADMIN", "MANAGER"].includes(access.organizationRole)) return { status: "forbidden" as const };
 
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`product-composition:${context.organizationId}:${parsed.data.parentPackagingId}`}))`;
 

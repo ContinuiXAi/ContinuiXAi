@@ -63,7 +63,13 @@ describe("product routes tenant isolation", () => {
         findMany: mocks.transactionCompositionFindMany,
       },
     }));
-    mocks.transactionQueryRaw.mockResolvedValue([{ organizationId: "org-a" }]);
+    mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const sql = strings.join(" ");
+      if (sql.includes('FROM "OrganizationMembership"')) return [{ organizationId: "org-a", role: "MANAGER" }];
+      if (sql.includes('FROM "Organization"')) return [{ id: "org-a" }];
+      if (sql.includes('FROM "User"')) return [{ id: "user-a", role: "GENERAL", isActive: true }];
+      return [];
+    });
     mocks.transactionExecuteRaw.mockResolvedValue(1);
     mocks.transactionPackagingFindFirst.mockResolvedValue({ id: "packaging-a", productId: "parent-a" });
     mocks.transactionProductFindMany.mockResolvedValue([
@@ -207,13 +213,15 @@ describe("product routes tenant isolation", () => {
       expect.objectContaining({ componentProductId: "component-a", quantityPerParent: 5, version: 2, isActive: true }),
       expect.objectContaining({ componentProductId: "component-b", quantityPerParent: 3, version: 2, isActive: true }),
     ]);
-    expect(mocks.transactionQueryRaw).toHaveBeenCalledTimes(1);
+    expect(mocks.transactionQueryRaw).toHaveBeenCalledTimes(3);
     expect(mocks.transactionExecuteRaw).toHaveBeenCalledTimes(1);
-    const [authorizationSql, ...authorizationValues] = mocks.transactionQueryRaw.mock.calls[0];
-    expect(authorizationSql.join(" ")).toMatch(/membership\."isActive" = TRUE/);
-    expect(authorizationSql.join(" ")).toMatch(/membership\."role" IN \('OWNER', 'ADMIN', 'MANAGER'\)/);
-    expect(authorizationSql.join(" ")).toMatch(/organization\."isActive" = TRUE/);
-    expect(authorizationValues).toEqual(["user-a", "org-a"]);
+    const authorizationSql = mocks.transactionQueryRaw.mock.calls.map(([parts]) => parts.join(" "));
+    expect(authorizationSql).toEqual([
+      expect.stringContaining('FROM "Organization"'),
+      expect.stringContaining('FROM "User"'),
+      expect.stringContaining('FROM "OrganizationMembership"'),
+    ]);
+    expect(authorizationSql.every((sql) => sql.includes("FOR UPDATE"))).toBe(true);
     expect(mocks.transactionPackagingFindFirst).toHaveBeenCalledWith({
       where: {
         id: "packaging-a",
@@ -271,6 +279,32 @@ describe("product routes tenant isolation", () => {
 
     expect(response.statusCode).toBe(403);
     expect(mocks.transactionPackagingFindFirst).not.toHaveBeenCalled();
+    expect(mocks.transactionCompositionUpdateMany).not.toHaveBeenCalled();
+    expect(mocks.transactionCompositionCreateMany).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("rejects an active but insufficient organization role before writing a composition", async () => {
+    mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const sql = strings.join(" ");
+      if (sql.includes('FROM "OrganizationMembership"')) return [{ organizationId: "org-a", role: "VIEWER" }];
+      if (sql.includes('FROM "Organization"')) return [{ id: "org-a" }];
+      if (sql.includes('FROM "User"')) return [{ id: "user-a", role: "GENERAL", isActive: true }];
+      return [];
+    });
+    const app = await testApp();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/products/parent-a/compositions?organizationId=org-a",
+      payload: {
+        parentPackagingId: "packaging-a",
+        components: [{ componentProductId: "component-a", quantityPerParent: 1 }],
+      },
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(mocks.transactionExecuteRaw).not.toHaveBeenCalled();
     expect(mocks.transactionCompositionUpdateMany).not.toHaveBeenCalled();
     expect(mocks.transactionCompositionCreateMany).not.toHaveBeenCalled();
     await app.close();

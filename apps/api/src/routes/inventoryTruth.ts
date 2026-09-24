@@ -5,6 +5,7 @@ import { isUniqueConstraintError } from "../lib/prismaErrors.js";
 import { calculateStoreCountDiscrepancies } from "./storeCount.js";
 import { inventoryTruthReviewRoutes } from "./inventoryTruthReview.js";
 import { countWriteError, hasRequiredCountObservations, lockCountScope, requireCountWriter } from "../lib/storeCountWriteAccess.js";
+import { lockSiteAndMembership } from "../lib/accessLocking.js";
 
 const locationHintSchema = z.object({
   siteId: z.string().trim().min(1),
@@ -207,25 +208,7 @@ export async function inventoryTruthRoutes(app: FastifyInstance) {
       ? new Date(parsed.data.lastObservedAt)
       : new Date();
     const result = await prisma.$transaction(async (tx) => {
-      const authorizedSites = await tx.$queryRaw<Array<{ id: string; organizationId: string }>>`
-        SELECT site."id", site."organizationId"
-        FROM "Site" AS site
-        INNER JOIN "SiteMembership" AS site_membership
-          ON site_membership."siteId" = site."id"
-        INNER JOIN "Organization" AS organization
-          ON organization."id" = site."organizationId"
-        INNER JOIN "OrganizationMembership" AS organization_membership
-          ON organization_membership."organizationId" = organization."id"
-        WHERE site_membership."userId" = ${userId}
-          AND site."id" = ${siteId}
-          AND site_membership."isActive" = TRUE
-          AND organization_membership."userId" = ${userId}
-          AND organization_membership."isActive" = TRUE
-          AND site."isActive" = TRUE
-          AND organization."isActive" = TRUE
-        FOR UPDATE OF site, site_membership, organization, organization_membership
-      `;
-      const site = authorizedSites[0];
+      const site = await lockSiteAndMembership(tx, userId, siteId, "update");
       if (!site) return { status: "forbidden" as const };
 
       const product = await tx.product.findFirst({
@@ -469,32 +452,7 @@ export async function inventoryTruthRoutes(app: FastifyInstance) {
     const { sessionId } = request.params as { sessionId: string };
 
     const result = await prisma.$transaction(async (tx) => {
-      const rows = await tx.$queryRaw<LockedCount[]>`
-        SELECT
-          session."id",
-          session."siteId",
-          site."organizationId",
-          session."status",
-          session."assignedToId"
-        FROM "StoreCountSession" AS session
-        INNER JOIN "Site" AS site
-          ON site."id" = session."siteId"
-        INNER JOIN "Organization" AS organization
-          ON organization."id" = site."organizationId"
-        INNER JOIN "SiteMembership" AS site_membership
-          ON site_membership."siteId" = site."id"
-        INNER JOIN "OrganizationMembership" AS organization_membership
-          ON organization_membership."organizationId" = organization."id"
-        WHERE session."id" = ${sessionId}
-          AND site_membership."userId" = ${userId}
-          AND organization_membership."userId" = ${userId}
-          AND site_membership."isActive" = TRUE
-          AND organization_membership."isActive" = TRUE
-          AND site."isActive" = TRUE
-          AND organization."isActive" = TRUE
-        FOR UPDATE OF session
-      `;
-      const locked = rows[0];
+      const locked = await lockCountScope(tx, sessionId, userId);
       if (!locked) return null;
       if (locked.status === "COMPLETED") {
         const discrepancies = await tx.storeCountDiscrepancy.findMany({

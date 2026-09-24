@@ -81,7 +81,9 @@ describe("administrator employee-creation tenant isolation", () => {
 
   it("creates membership and site access only in the selected managed organization", async () => {
     mocks.transactionQueryRaw
-      .mockResolvedValueOnce([{ organizationId: "org-a" }])
+      .mockResolvedValueOnce([{ id: "org-a" }])
+      .mockResolvedValueOnce([{ id: "admin-a", role: "ADMIN", isActive: true }])
+      .mockResolvedValueOnce([{ organizationId: "org-a", role: "ADMIN" }])
       .mockResolvedValueOnce([{ id: "site-a" }]);
     const app = await testApp();
 
@@ -130,10 +132,28 @@ describe("administrator employee-creation tenant isolation", () => {
     await app.close();
   });
 
+  it("rejects an active membership with an insufficient organization role before creating the user", async () => {
+    mocks.transactionQueryRaw
+      .mockResolvedValueOnce([{ id: "org-a" }])
+      .mockResolvedValueOnce([{ id: "admin-a", role: "ADMIN", isActive: true }])
+      .mockResolvedValueOnce([{ organizationId: "org-a", role: "VIEWER" }]);
+    const app = await testApp();
+
+    const response = await app.inject({ method: "POST", url: "/api/auth/users", payload: employee });
+
+    expect(response.statusCode).toBe(404);
+    expect(mocks.userCreate).not.toHaveBeenCalled();
+    expect(mocks.membershipCreate).not.toHaveBeenCalled();
+    expect(mocks.siteMembershipCreate).not.toHaveBeenCalled();
+    await app.close();
+  });
+
   it("does not grant access to a site that left the selected organization before the transaction", async () => {
     mocks.membershipFindFirst.mockResolvedValue({ organization: { sites: [{ id: "site-a" }] } });
     mocks.transactionQueryRaw
-      .mockResolvedValueOnce([{ organizationId: "org-a" }])
+      .mockResolvedValueOnce([{ id: "org-a" }])
+      .mockResolvedValueOnce([{ id: "admin-a", role: "ADMIN", isActive: true }])
+      .mockResolvedValueOnce([{ organizationId: "org-a", role: "ADMIN" }])
       .mockResolvedValueOnce([]);
     const app = await testApp();
 
