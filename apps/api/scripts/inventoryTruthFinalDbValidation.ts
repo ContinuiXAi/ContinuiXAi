@@ -315,6 +315,7 @@ async function main() {
     const afterRevokeFirst = await prisma.storeCountDiscrepancy.findUniqueOrThrow({ where: { id: revokeFirst.discrepancy.id } });
     assert.equal(afterRevokeFirst.updatedAt.getTime(), beforeRevokeFirst.updatedAt.getTime(), "revoked discrepancy request mutated evidence");
     await prisma.user.update({ where: { id: a.id }, data: { isActive: true } });
+    assert.equal((await cancel(revokeFirst)).statusCode, 200);
 
     // If the discrepancy request wins, its SHARE authorization locks must hold
     // a concurrent deactivation until the request commits. Once revocation has
@@ -341,6 +342,7 @@ async function main() {
     const afterRejectedRead = await prisma.storeCountDiscrepancy.findUniqueOrThrow({ where: { id: requestFirst.discrepancy.id } });
     assert.equal(afterRejectedRead.updatedAt.getTime(), afterAuthorizedRead.updatedAt.getTime(), "post-revocation discrepancy request mutated evidence");
     await prisma.user.update({ where: { id: a.id }, data: { isActive: true } });
+    assert.equal((await cancel(requestFirst)).statusCode, 200);
 
     // Cancellation obeys the same state transition lock in both real orders.
     for (const first of ["cancel", "finish", "approve"]) {
