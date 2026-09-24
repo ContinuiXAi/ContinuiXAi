@@ -1058,13 +1058,16 @@ describe("inventory truth HTTP routes", () => {
     await app.close();
   });
 
-  it("does not expose discrepancies when any organization or site relationship predicate is removed", async () => {
-    mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
-      const fullyScoped = hasExactSessionAuthorization(strings, values, {
-        sessionId: "session-in-site-b",
-        userId: "user-a",
-      });
-      return fullyScoped ? [] : [{ ...lockedCount, id: "session-in-site-b", siteId: "site-b", organizationId: "org-b" }];
+  it.each(["organization", "user", "organization-membership", "site", "site-membership"])("does not expose discrepancies when %s authorization is inactive", async (missing) => {
+    mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const sql = normalizedSql(strings);
+      if (sql.includes('FROM "StoreCountSession"')) return [{ ...lockedCount, id: "session-in-site-b", siteId: "site-b", organizationId: "org-b", startedAt: new Date(0) }];
+      if (sql.includes('FROM "OrganizationMembership"')) return missing === "organization-membership" ? [] : [{ organizationId: "org-b", role: "MANAGER" }];
+      if (sql.includes('FROM "Organization"')) return missing === "organization" ? [] : [{ id: "org-b" }];
+      if (sql.includes('FROM "User"')) return missing === "user" ? [] : [{ id: "user-a", role: "GENERAL", isActive: true }];
+      if (sql.includes('FROM "SiteMembership"')) return missing === "site-membership" ? [] : [{ siteId: "site-b" }];
+      if (sql.includes('FROM "Site"')) return missing === "site" ? [] : [{ id: "site-b", organizationId: "org-b" }];
+      return [];
     });
     const app = await testApp();
 
@@ -1082,10 +1085,10 @@ describe("inventory truth HTTP routes", () => {
   it("does not expose discrepancies to an inactive user with still-active memberships", async () => {
     mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
       const sql = normalizedSql(strings);
-      if (!sql.includes('FROM "StoreCountSession" AS session')) return [];
-      const checksActiveUser = sql.includes('INNER JOIN "User" AS actor ON actor."id" = site_membership."userId"')
-        && sql.includes('actor."isActive" = TRUE');
-      return checksActiveUser ? [] : [lockedCount];
+      if (sql.includes('FROM "StoreCountSession"')) return [{ ...lockedCount, startedAt: new Date(0) }];
+      if (sql.includes('FROM "Organization"')) return [{ id: "org-a" }];
+      if (sql.includes('FROM "User"')) return [];
+      throw new Error(`authorization continued after inactive actor: ${sql}`);
     });
     const app = await testApp();
 
@@ -1097,6 +1100,28 @@ describe("inventory truth HTTP routes", () => {
     expect(response.statusCode).toBe(404);
     expect(mocks.transactionDiscrepancyFindMany).not.toHaveBeenCalled();
     expect(mocks.transactionDiscrepancyUpsert).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("holds the complete discrepancy authorization scope in the established lock order", async () => {
+    const lockOrder: string[] = [];
+    mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const sql = normalizedSql(strings);
+      if (sql.includes('FROM "StoreCountSession"')) { lockOrder.push("session"); return [{ ...lockedCount, startedAt: new Date(0) }]; }
+      if (sql.includes('FROM "OrganizationMembership"')) { lockOrder.push("organization-membership"); return [{ organizationId: "org-a", role: "MANAGER" }]; }
+      if (sql.includes('FROM "Organization"')) { lockOrder.push("organization"); return [{ id: "org-a" }]; }
+      if (sql.includes('FROM "User"')) { lockOrder.push("user"); return [{ id: "user-a", role: "GENERAL", isActive: true }]; }
+      if (sql.includes('FROM "SiteMembership"')) { lockOrder.push("site-membership"); return [{ siteId: "site-a" }]; }
+      if (sql.includes('FROM "Site"')) { lockOrder.push("site"); return [activeSite]; }
+      return [];
+    });
+    mocks.transactionVisitCount.mockResolvedValue(1);
+    const app = await testApp();
+
+    const response = await app.inject({ method: "GET", url: "/api/inventory-truth/counts/session-a/discrepancies" });
+
+    expect(response.statusCode).toBe(200);
+    expect(lockOrder).toEqual(["session", "organization", "user", "organization-membership", "site", "site-membership"]);
     await app.close();
   });
 

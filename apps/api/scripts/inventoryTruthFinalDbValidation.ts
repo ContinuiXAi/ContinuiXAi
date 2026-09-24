@@ -17,7 +17,8 @@ async function main() {
   assert(url.pathname.endsWith("_ci"), "Database name must end in _ci; independently verify this is not a production tunnel");
   const holder = new pg.Client({ connectionString, application_name: "truth-final-holder" });
   const observer = new pg.Client({ connectionString, application_name: "truth-final-observer" });
-  await holder.connect(); await observer.connect();
+  const revoker = new pg.Client({ connectionString, application_name: "truth-final-revoker" });
+  await holder.connect(); await observer.connect(); await revoker.connect();
   const holderPid = Number((await holder.query("SELECT pg_backend_pid() AS pid")).rows[0].pid);
   const app = Fastify();
   app.decorate("authenticate", async (request) => {
@@ -68,6 +69,7 @@ async function main() {
   const verify = (c: Count, actor = a.id) => send(actor, "POST", `/truth/counts/${c.session.id}/locations/${location.id}/verify`, { offlineQueueFlushed: true });
   const finish = (c: Count, actor = a.id) => send(actor, "POST", `/count/sessions/${c.session.id}/complete`);
   const cancel = (c: Count, actor = a.id) => send(actor, "POST", `/count/sessions/${c.session.id}/cancel`);
+  const discrepancies = (c: Count, actor = a.id) => send(actor, "GET", `/truth/counts/${c.session.id}/discrepancies`);
   const reassign = (c: Count) => send(manager.id, "POST", `/truth/counts/${c.session.id}/reassign`, { toUserId: b.id, reason: "Audited handoff" });
   async function reviewToken(c: Count) {
     const review = await send(manager.id, "GET", `/truth/counts/${c.session.id}/review`);
@@ -301,6 +303,45 @@ async function main() {
       }
     }
 
+    // If revocation commits before the discrepancy request obtains the session
+    // lock, the request must re-check the inactive actor and perform no mutation
+    // or disclosure.
+    const revokeFirst = await count(await product());
+    const beforeRevokeFirst = await prisma.storeCountDiscrepancy.findUniqueOrThrow({ where: { id: revokeFirst.discrepancy.id } });
+    const revokeFirstResult = await scheduled(revokeFirst, [() => discrepancies(revokeFirst)], async () => {
+      await holder.query('UPDATE "User" SET "isActive" = FALSE WHERE "id" = $1', [a.id]);
+    });
+    assert.equal(revokeFirstResult[0].statusCode, 404, revokeFirstResult[0].body);
+    const afterRevokeFirst = await prisma.storeCountDiscrepancy.findUniqueOrThrow({ where: { id: revokeFirst.discrepancy.id } });
+    assert.equal(afterRevokeFirst.updatedAt.getTime(), beforeRevokeFirst.updatedAt.getTime(), "revoked discrepancy request mutated evidence");
+    await prisma.user.update({ where: { id: a.id }, data: { isActive: true } });
+
+    // If the discrepancy request wins, its SHARE authorization locks must hold
+    // a concurrent deactivation until the request commits. Once revocation has
+    // committed, a second request must disclose nothing and mutate nothing.
+    const requestFirst = await count(await product());
+    await holder.query("BEGIN");
+    try {
+      await holder.query('SELECT "id" FROM "StoreCountDiscrepancy" WHERE "id" = $1 FOR UPDATE', [requestFirst.discrepancy.id]);
+      const authorizedRead = discrepancies(requestFirst);
+      await waitForBlockedQuery('StoreCountDiscrepancy');
+      const deactivation = revoker.query('UPDATE "User" SET "isActive" = FALSE WHERE "id" = $1', [a.id]);
+      await waitForBlockedQuery('UPDATE "User"');
+      await holder.query("COMMIT");
+      const authorizedResponse = await authorizedRead;
+      assert.equal(authorizedResponse.statusCode, 200, authorizedResponse.body);
+      await deactivation;
+    } catch (error) {
+      await holder.query("ROLLBACK");
+      throw error;
+    }
+    const afterAuthorizedRead = await prisma.storeCountDiscrepancy.findUniqueOrThrow({ where: { id: requestFirst.discrepancy.id } });
+    const rejectedRead = await discrepancies(requestFirst);
+    assert.equal(rejectedRead.statusCode, 404, rejectedRead.body);
+    const afterRejectedRead = await prisma.storeCountDiscrepancy.findUniqueOrThrow({ where: { id: requestFirst.discrepancy.id } });
+    assert.equal(afterRejectedRead.updatedAt.getTime(), afterAuthorizedRead.updatedAt.getTime(), "post-revocation discrepancy request mutated evidence");
+    await prisma.user.update({ where: { id: a.id }, data: { isActive: true } });
+
     // Cancellation obeys the same state transition lock in both real orders.
     for (const first of ["cancel", "finish", "approve"]) {
       const c = await count(await product()); const token = await reviewToken(c);
@@ -316,7 +357,7 @@ async function main() {
     const cancelFirst = await count(await product()); const cancelToken = await reviewToken(cancelFirst);
     assert.deepEqual((await scheduled(cancelFirst, [() => cancel(cancelFirst), () => approve(cancelFirst, cancelToken)])).map((r) => r.statusCode), [200, 409]);
     assert.equal(await prisma.inventoryTransaction.count({ where: { referenceId: cancelFirst.discrepancy.id } }), 0);
-    console.log("Final inventory truth PostgreSQL validation passed: assigned discovery/handoff, cross-route reassignment/location-hint lock ordering, real scan-versus-stale-edit conflict, frozen required zero evidence, recipe aliases/versions, all five authority revocations across scan/edit/verify/Finish/Cancel, and both cancellation/Finish/approval lock orders. Fixture evidence retained until disposable database teardown.");
-  } finally { await app.close(); await holder.end(); await observer.end(); await prisma.$disconnect(); }
+    console.log("Final inventory truth PostgreSQL validation passed: assigned discovery/handoff, cross-route reassignment/location-hint lock ordering, real scan-versus-stale-edit conflict, frozen required zero evidence, recipe aliases/versions, all five authority revocations across scan/edit/verify/Finish/Cancel, both discrepancy-read/revocation lock orders with no post-revocation disclosure or mutation, and both cancellation/Finish/approval lock orders. Fixture evidence retained until disposable database teardown.");
+  } finally { await app.close(); await holder.end(); await observer.end(); await revoker.end(); await prisma.$disconnect(); }
 }
 main().catch((error) => { console.error(error); process.exit(1); });

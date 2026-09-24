@@ -452,35 +452,7 @@ export async function inventoryTruthRoutes(app: FastifyInstance) {
     const { sessionId } = request.params as { sessionId: string };
 
     const result = await prisma.$transaction(async (tx) => {
-      const rows = await tx.$queryRaw<LockedCount[]>`
-        SELECT
-          session."id",
-          session."siteId",
-          site."organizationId",
-          session."status",
-          session."assignedToId"
-        FROM "StoreCountSession" AS session
-        INNER JOIN "Site" AS site
-          ON site."id" = session."siteId"
-        INNER JOIN "Organization" AS organization
-          ON organization."id" = site."organizationId"
-        INNER JOIN "SiteMembership" AS site_membership
-          ON site_membership."siteId" = site."id"
-        INNER JOIN "OrganizationMembership" AS organization_membership
-          ON organization_membership."organizationId" = organization."id"
-        INNER JOIN "User" AS actor
-          ON actor."id" = site_membership."userId"
-        WHERE session."id" = ${sessionId}
-          AND site_membership."userId" = ${userId}
-          AND organization_membership."userId" = ${userId}
-          AND site_membership."isActive" = TRUE
-          AND organization_membership."isActive" = TRUE
-          AND actor."isActive" = TRUE
-          AND site."isActive" = TRUE
-          AND organization."isActive" = TRUE
-        FOR UPDATE OF session
-      `;
-      const locked = rows[0];
+      const locked = await lockCountScope(tx, sessionId, userId);
       if (!locked) return null;
       if (locked.status === "COMPLETED") {
         const discrepancies = await tx.storeCountDiscrepancy.findMany({
