@@ -468,11 +468,14 @@ export async function inventoryTruthRoutes(app: FastifyInstance) {
           ON site_membership."siteId" = site."id"
         INNER JOIN "OrganizationMembership" AS organization_membership
           ON organization_membership."organizationId" = organization."id"
+        INNER JOIN "User" AS actor
+          ON actor."id" = site_membership."userId"
         WHERE session."id" = ${sessionId}
           AND site_membership."userId" = ${userId}
           AND organization_membership."userId" = ${userId}
           AND site_membership."isActive" = TRUE
           AND organization_membership."isActive" = TRUE
+          AND actor."isActive" = TRUE
           AND site."isActive" = TRUE
           AND organization."isActive" = TRUE
         FOR UPDATE OF session

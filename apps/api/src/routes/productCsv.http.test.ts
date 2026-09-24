@@ -294,6 +294,28 @@ describe("product CSV tenant-safe onboarding", () => {
     await app.close();
   });
 
+  it("rejects an active but insufficient organization role at commit without writing products", async () => {
+    const app = await testApp();
+    const first = await preview(app, "upc,name\n001234,Milk\n");
+    mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const sql = strings.join(" ");
+      if (sql.includes('FROM "User"')) return [{ id: "org-a-user", role: "GENERAL", isActive: true }];
+      if (sql.includes('FROM "Organization"')) return [{ id: "org-a" }];
+      if (sql.includes('FROM "OrganizationMembership"')) return [{ organizationId: "org-a", role: "VIEWER" }];
+      throw new Error(`Unexpected authorization SQL: ${sql}`);
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/products/import/commit",
+      payload: { previewId: first.json().previewId, organizationId: "org-a" },
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(mocks.transactionProductCreateMany).not.toHaveBeenCalled();
+    await app.close();
+  });
+
   it("rejects ambiguous organizations and cross-tenant exports without product reads", async () => {
     mocks.membershipFindMany.mockResolvedValue([{ organizationId: "org-a" }, { organizationId: "org-b" }]);
     const app = await testApp();

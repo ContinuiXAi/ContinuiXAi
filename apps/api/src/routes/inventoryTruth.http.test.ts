@@ -1079,6 +1079,27 @@ describe("inventory truth HTTP routes", () => {
     await app.close();
   });
 
+  it("does not expose discrepancies to an inactive user with still-active memberships", async () => {
+    mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const sql = normalizedSql(strings);
+      if (!sql.includes('FROM "StoreCountSession" AS session')) return [];
+      const checksActiveUser = sql.includes('INNER JOIN "User" AS actor ON actor."id" = site_membership."userId"')
+        && sql.includes('actor."isActive" = TRUE');
+      return checksActiveUser ? [] : [lockedCount];
+    });
+    const app = await testApp();
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/inventory-truth/counts/session-a/discrepancies",
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(mocks.transactionDiscrepancyFindMany).not.toHaveBeenCalled();
+    expect(mocks.transactionDiscrepancyUpsert).not.toHaveBeenCalled();
+    await app.close();
+  });
+
   it("does not finalize discrepancies while any required location remains unverified", async () => {
     mocks.transactionQueryRaw.mockResolvedValue([lockedCount]);
     mocks.transactionVisitCount.mockResolvedValue(1);
