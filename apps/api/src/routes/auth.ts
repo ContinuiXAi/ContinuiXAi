@@ -16,6 +16,7 @@ import { t } from "../lib/i18n.js";
 import { bumpTokenVersion, invalidateTokenVersionCache } from "../lib/tokenVersion.js";
 import { clearMediaCookie } from "../lib/mediaAuth.js";
 import { isPublicRegistrationEnabled } from "../lib/publicRegistration.js";
+import { lockActorOrganizationAccess } from "../lib/accessLocking.js";
 import { comparePasswordOrDummy, compareRecoveryPinOrDummy } from "../lib/credentialTiming.js";
 import { revokeAllUserSessions, revokeSession } from "../lib/sessionService.js";
 
@@ -211,19 +212,8 @@ export async function authRoutes(app: FastifyInstance) {
     const { name, email, password, role, organizationId } = parsed.data;
     const [passwordHash, employeeNumber] = await Promise.all([bcrypt.hash(password, 10), createEmployeeNumber()]);
     const user = await prisma.$transaction(async (tx) => {
-      const managedOrganizations = await tx.$queryRaw<Array<{ organizationId: string }>>`
-        SELECT membership."organizationId"
-        FROM "OrganizationMembership" AS membership
-        INNER JOIN "Organization" AS organization
-          ON organization."id" = membership."organizationId"
-        WHERE membership."userId" = ${request.user.sub}
-          AND membership."organizationId" = ${organizationId}
-          AND membership."isActive" = TRUE
-          AND membership."role" IN ('OWNER', 'ADMIN')
-          AND organization."isActive" = TRUE
-        FOR UPDATE OF membership, organization
-      `;
-      if (managedOrganizations.length !== 1) return null;
+      const access = await lockActorOrganizationAccess(tx, request.user.sub, organizationId, "update");
+      if (!access || !["OWNER", "ADMIN"].includes(access.organizationRole)) return null;
 
       const sites = await tx.$queryRaw<Array<{ id: string }>>`
         SELECT site."id"

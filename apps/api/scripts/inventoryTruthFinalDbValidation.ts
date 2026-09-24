@@ -93,6 +93,17 @@ async function main() {
     }
     throw new Error(`Did not observe ${expected} blocked count writers; schedule is not proven`);
   }
+  async function waitForBlockedQuery(fragment: string) {
+    const deadline = Date.now() + 3_000;
+    while (Date.now() < deadline) {
+      const result = await observer.query<{ count: number }>(`SELECT COUNT(*)::int AS count FROM pg_stat_activity
+        WHERE pid <> $1 AND state = 'active' AND query LIKE $2
+          AND cardinality(pg_blocking_pids(pid)) > 0`, [holderPid, `%${fragment}%`]);
+      if (result.rows[0].count > 0) return;
+      await sleep(10);
+    }
+    throw new Error(`Did not observe a blocked ${fragment} query; cross-route schedule is not proven`);
+  }
   async function scheduled(c: Count, requests: Array<() => ReturnType<typeof send>>, beforeCommit?: () => Promise<unknown>) {
     await holder.query("BEGIN");
     try {
@@ -179,6 +190,31 @@ async function main() {
     assert.equal((await finish(owned, b.id)).statusCode, 200);
     const cancellable = await count(await product(), b.id);
     assert.equal((await cancel(cancellable, b.id)).statusCode, 200);
+
+    // Reassignment's recipient User FK lock must not deadlock with a concurrent
+    // location-hint authorization write. Holding Organization SHARE reproduces
+    // the exact midpoint: the real HTTP route must wait on Organization before
+    // it can lock the recipient User, allowing the FK update to finish first.
+    const crossRoute = await count(await product());
+    await holder.query("BEGIN");
+    try {
+      await holder.query('SELECT "id" FROM "Organization" WHERE "id" = $1 FOR SHARE', [org.id]);
+      const hintRequest = send(b.id, "POST", `/truth/products/${crossRoute.item.id}/location-hints`, {
+        siteId: site.id,
+        locationId: location.id,
+        evidence: "ASSIGNED",
+        isRequired: true,
+      });
+      await waitForBlockedQuery('FROM "Organization"');
+      await holder.query('UPDATE "StoreCountSession" SET "assignedToId" = $1 WHERE "id" = $2', [b.id, crossRoute.session.id]);
+      await holder.query("COMMIT");
+      const hintResponse = await hintRequest;
+      assert.equal(hintResponse.statusCode, 201, hintResponse.body);
+    } catch (error) {
+      await holder.query("ROLLBACK");
+      throw error;
+    }
+    assert.equal((await cancel(crossRoute, b.id)).statusCode, 200);
 
     // Reassignment wins before queued former-owner scan obtains its lock.
     const handoff = await count(await product());
@@ -280,7 +316,7 @@ async function main() {
     const cancelFirst = await count(await product()); const cancelToken = await reviewToken(cancelFirst);
     assert.deepEqual((await scheduled(cancelFirst, [() => cancel(cancelFirst), () => approve(cancelFirst, cancelToken)])).map((r) => r.statusCode), [200, 409]);
     assert.equal(await prisma.inventoryTransaction.count({ where: { referenceId: cancelFirst.discrepancy.id } }), 0);
-    console.log("Final inventory truth PostgreSQL validation passed: assigned discovery/handoff, real scan-versus-stale-edit conflict, frozen required zero evidence, recipe aliases/versions, all five authority revocations across scan/edit/verify/Finish/Cancel, and both cancellation/Finish/approval lock orders. Fixture evidence retained until disposable database teardown.");
+    console.log("Final inventory truth PostgreSQL validation passed: assigned discovery/handoff, cross-route reassignment/location-hint lock ordering, real scan-versus-stale-edit conflict, frozen required zero evidence, recipe aliases/versions, all five authority revocations across scan/edit/verify/Finish/Cancel, and both cancellation/Finish/approval lock orders. Fixture evidence retained until disposable database teardown.");
   } finally { await app.close(); await holder.end(); await observer.end(); await prisma.$disconnect(); }
 }
 main().catch((error) => { console.error(error); process.exit(1); });

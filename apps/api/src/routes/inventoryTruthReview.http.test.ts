@@ -51,13 +51,38 @@ describe("inventory truth explanation and approval", () => {
         $queryRaw: async (parts: TemplateStringsArray, ...values: unknown[]) => {
           const sql = parts.join(" ? ").replace(/\s+/g, " ");
           if (sql.includes("missing_observation")) return missingObservation ? [{ productId: "omitted", locationId: "shelf" }] : [];
-          if (sql.includes('FROM "StoreCountSession" WHERE') && sql.endsWith("FOR UPDATE")) {
+          if (sql.includes('FROM "StoreCountSession" AS session') && sql.includes("FOR UPDATE OF session") && !sql.includes('OrganizationMembership')) {
             const previous = tail;
             tail = new Promise<void>((resolve) => { release = resolve; });
             await previous; locked = true;
             snapshot = { discrepancy: { ...discrepancy }, ledger: [...ledger] };
             events.push("session-lock");
-            return [session];
+            return [{ ...session, startedAt: new Date("2026-09-15T00:00:00Z") }];
+          }
+          if (sql.includes('FROM "User"')) {
+            expect(sql).toContain('"isActive" = TRUE');
+            expect(values).toEqual([expect.any(String)]);
+            return inactivePredicate === 'actor."isActive" = TRUE' || !authorized ? [] : [{ id: values[0], role: "GENERAL", isActive: true }];
+          }
+          if (sql.includes('FROM "OrganizationMembership"')) {
+            expect(sql).toContain('"isActive" = TRUE');
+            expect(values).toEqual(["org", expect.any(String)]);
+            return inactivePredicate === 'organization_membership."isActive" = TRUE' || !authorized ? [] : [{ organizationId: "org", role: session.organizationRole }];
+          }
+          if (sql.includes('FROM "Organization"')) {
+            expect(sql).toContain('"isActive" = TRUE');
+            expect(values).toEqual(["org"]);
+            return inactivePredicate === 'organization."isActive" = TRUE' || !authorized ? [] : [{ id: "org" }];
+          }
+          if (sql.includes('FROM "SiteMembership"')) {
+            expect(sql).toContain('"isActive" = TRUE');
+            expect(values).toEqual(["site", expect.any(String)]);
+            return inactivePredicate === 'site_membership."isActive" = TRUE' || !authorized ? [] : [{ siteId: "site" }];
+          }
+          if (sql.includes('FROM "Site"')) {
+            expect(sql).toContain('"isActive" = TRUE');
+            expect(values).toEqual(["site"]);
+            return inactivePredicate === 'site."isActive" = TRUE' || !authorized ? [] : [{ id: "site", organizationId: "org" }];
           }
           if (sql.includes('FROM "StoreCountSession"')) {
             if (inactivePredicate && sql.includes(inactivePredicate)) return [];

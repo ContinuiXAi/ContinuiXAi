@@ -65,7 +65,13 @@ describe("product CSV tenant-safe onboarding", () => {
       product: { findMany: mocks.transactionProductFindMany, createMany: mocks.transactionProductCreateMany },
       category: { findMany: mocks.categoryFindMany },
     }));
-    mocks.transactionQueryRaw.mockResolvedValue([{ organizationId: "org-a" }]);
+    mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const sql = strings.join(" ");
+      if (sql.includes('FROM "User"')) return [{ id: "org-a-user", role: "GENERAL", isActive: true }];
+      if (sql.includes('FROM "Organization"')) return [{ id: "org-a" }];
+      if (sql.includes('FROM "OrganizationMembership"')) return [{ organizationId: "org-a", role: "MANAGER" }];
+      throw new Error(`Unexpected authorization SQL: ${sql}`);
+    });
     mocks.transactionExecuteRaw.mockResolvedValue(1);
     mocks.transactionProductFindMany.mockResolvedValue([]);
     mocks.transactionProductCreateMany.mockResolvedValue({ count: 1 });
@@ -151,13 +157,46 @@ describe("product CSV tenant-safe onboarding", () => {
 
     if (response.statusCode !== 201) throw new Error(response.body);
     expect(response.statusCode).toBe(201);
-    expect(mocks.transactionQueryRaw).toHaveBeenCalled();
+    const authorizationOrder = mocks.transactionQueryRaw.mock.calls.map(([strings]) => {
+      const sql = (strings as TemplateStringsArray).join(" ");
+      if (sql.includes('FROM "User"')) return "user";
+      if (sql.includes('FROM "Organization"')) return "organization";
+      if (sql.includes('FROM "OrganizationMembership"')) return "organization-membership";
+      return "other";
+    });
+    expect(authorizationOrder.slice(0, 3)).toEqual(["organization", "user", "organization-membership"]);
     expect(mocks.transactionProductCreateMany).toHaveBeenCalledWith(expect.objectContaining({
       data: [expect.objectContaining({ organizationId: "org-a", barcodeValue: "001234", name: "Milk" })],
     }));
     const replay = await app.inject({ method: "POST", url: "/api/products/import/commit", payload: { previewId, organizationId: "org-a" } });
     expect(replay.statusCode).toBe(404);
     expect(mocks.transactionProductCreateMany).toHaveBeenCalledTimes(1);
+    await app.close();
+  });
+
+  it.each([
+    ["inactive actor", 'FROM "User"'],
+    ["inactive organization", 'FROM "Organization"'],
+    ["inactive manager membership", 'FROM "OrganizationMembership"'],
+  ])("rejects %s at the transactional write boundary", async (_label, missingSql) => {
+    mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const sql = strings.join(" ");
+      if (sql.includes(missingSql)) return [];
+      if (sql.includes('FROM "User"')) return [{ id: "org-a-user", role: "GENERAL", isActive: true }];
+      if (sql.includes('FROM "Organization"')) return [{ id: "org-a" }];
+      if (sql.includes('FROM "OrganizationMembership"')) return [{ organizationId: "org-a", role: "MANAGER" }];
+      throw new Error(`Unexpected authorization SQL: ${sql}`);
+    });
+    const app = await testApp();
+    const reviewed = await preview(app, "upc,name\n001234,Milk\n");
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/products/import/commit",
+      payload: { previewId: reviewed.json().previewId, organizationId: "org-a" },
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(mocks.transactionProductCreateMany).not.toHaveBeenCalled();
     await app.close();
   });
 
@@ -372,7 +411,14 @@ describe("product CSV tenant-safe onboarding", () => {
     const first = await preview(app, "upc,name\n,Milk\n");
     let release!: () => void;
     const waiting = new Promise<void>((resolve) => { release = resolve; });
-    mocks.transactionQueryRaw.mockImplementation(async () => { await waiting; return [{ organizationId: "org-a" }]; });
+    mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      await waiting;
+      const sql = strings.join(" ");
+      if (sql.includes('FROM "User"')) return [{ id: "org-a-user", role: "GENERAL", isActive: true }];
+      if (sql.includes('FROM "Organization"')) return [{ id: "org-a" }];
+      if (sql.includes('FROM "OrganizationMembership"')) return [{ organizationId: "org-a", role: "MANAGER" }];
+      throw new Error(`Unexpected authorization SQL: ${sql}`);
+    });
     const request = { method: "POST" as const, url: "/api/products/import/commit", payload: { previewId: first.json().previewId, organizationId: "org-a" } };
     const firstCommit = app.inject(request);
     const secondCommit = app.inject(request);

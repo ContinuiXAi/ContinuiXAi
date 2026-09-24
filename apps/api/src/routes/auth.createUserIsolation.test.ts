@@ -81,7 +81,9 @@ describe("administrator employee-creation tenant isolation", () => {
 
   it("creates membership and site access only in the selected managed organization", async () => {
     mocks.transactionQueryRaw
-      .mockResolvedValueOnce([{ organizationId: "org-a" }])
+      .mockResolvedValueOnce([{ id: "org-a" }])
+      .mockResolvedValueOnce([{ id: "admin-a", role: "ADMIN", isActive: true }])
+      .mockResolvedValueOnce([{ organizationId: "org-a", role: "ADMIN" }])
       .mockResolvedValueOnce([{ id: "site-a" }]);
     const app = await testApp();
 
@@ -133,7 +135,9 @@ describe("administrator employee-creation tenant isolation", () => {
   it("does not grant access to a site that left the selected organization before the transaction", async () => {
     mocks.membershipFindFirst.mockResolvedValue({ organization: { sites: [{ id: "site-a" }] } });
     mocks.transactionQueryRaw
-      .mockResolvedValueOnce([{ organizationId: "org-a" }])
+      .mockResolvedValueOnce([{ id: "org-a" }])
+      .mockResolvedValueOnce([{ id: "admin-a", role: "ADMIN", isActive: true }])
+      .mockResolvedValueOnce([{ organizationId: "org-a", role: "ADMIN" }])
       .mockResolvedValueOnce([]);
     const app = await testApp();
 

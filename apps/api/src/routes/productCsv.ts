@@ -5,6 +5,7 @@ import { productCsvCommitSchema, type ProductCsvNormalizedRow } from "@continuix
 import { decodeUtf8Csv, encodeCsvRow, parseCsv, stripCsvFormulaGuard } from "../lib/csv.js";
 import { prisma } from "../lib/prisma.js";
 import { isUniqueConstraintError } from "../lib/prismaErrors.js";
+import { lockActorOrganizationAccess } from "../lib/accessLocking.js";
 
 const MAX_CSV_BYTES = 5 * 1024 * 1024;
 const MAX_CSV_ROWS = 10_000;
@@ -253,20 +254,8 @@ export async function productCsvRoutes(app: FastifyInstance) {
     // another review; no partially committed preview is ever retried blindly.
     previews.delete(preview.previewId);
     const result = await prisma.$transaction(async (tx) => {
-      const authorized = await tx.$queryRaw<Array<{ organizationId: string }>>`
-        SELECT membership."organizationId"
-        FROM "OrganizationMembership" AS membership
-        INNER JOIN "Organization" AS organization ON organization."id" = membership."organizationId"
-        INNER JOIN "User" AS actor ON actor."id" = membership."userId"
-        WHERE membership."userId" = ${request.user.sub}
-          AND membership."organizationId" = ${preview.organizationId}
-          AND membership."isActive" = TRUE
-          AND membership."role" IN ('OWNER', 'ADMIN', 'MANAGER')
-          AND organization."isActive" = TRUE
-          AND actor."isActive" = TRUE
-        FOR UPDATE OF membership, organization, actor
-      `;
-      if (authorized.length !== 1) return { status: "forbidden" as const };
+      const authorized = await lockActorOrganizationAccess(tx, request.user.sub, preview.organizationId, "update");
+      if (!authorized || !["OWNER", "ADMIN", "MANAGER"].includes(authorized.organizationRole)) return { status: "forbidden" as const };
       if (
         preview.expiresAt.getTime() <= Date.now()
         || preview.digest !== digestRows(preview.rows)

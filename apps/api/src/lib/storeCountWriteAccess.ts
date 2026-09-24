@@ -1,4 +1,5 @@
 import type { Prisma } from "@prisma/client";
+import { lockSiteAndMembership } from "./accessLocking.js";
 
 export type CountScope = {
   id: string;
@@ -23,23 +24,23 @@ export function assignedCountWhere(userId: string) {
 // reassignment/revocation may wait here; the next statement must see fresh state.
 // SHARE locks keep authority stable until commit without serializing all counts.
 export async function lockCountScope(tx: Prisma.TransactionClient, sessionId: string, userId: string) {
-  await tx.$queryRaw`SELECT "status" FROM "StoreCountSession" WHERE "id" = ${sessionId} FOR UPDATE`;
-  const rows = await tx.$queryRaw<CountScope[]>`
+  const rows = await tx.$queryRaw<Array<Omit<CountScope, "organizationRole">>>`
     SELECT session."id", session."siteId", site."organizationId", session."status", session."startedAt",
-      session."startedById", session."assignedToId", organization_membership."role" AS "organizationRole"
+      session."startedById", session."assignedToId"
     FROM "StoreCountSession" AS session
     INNER JOIN "Site" AS site ON site."id" = session."siteId"
-    INNER JOIN "Organization" AS organization ON organization."id" = site."organizationId"
-    INNER JOIN "SiteMembership" AS site_membership ON site_membership."siteId" = site."id"
-    INNER JOIN "OrganizationMembership" AS organization_membership ON organization_membership."organizationId" = organization."id"
-    INNER JOIN "User" AS actor ON actor."id" = organization_membership."userId"
     WHERE session."id" = ${sessionId}
-      AND site_membership."userId" = ${userId} AND organization_membership."userId" = ${userId}
-      AND site_membership."isActive" = TRUE AND organization_membership."isActive" = TRUE
-      AND site."isActive" = TRUE AND organization."isActive" = TRUE AND actor."isActive" = TRUE
-    FOR SHARE OF site_membership, organization_membership, site, organization, actor
+    FOR UPDATE OF session
   `;
-  return rows[0] ?? null;
+  const session = rows[0];
+  if (!session?.siteId) return null;
+  const access = await lockSiteAndMembership(tx, userId, session.siteId, "share", session.organizationId);
+  if (!access) return null;
+  return {
+    ...session,
+    organizationId: access.organizationId,
+    organizationRole: access.organizationRole,
+  };
 }
 
 export async function requireCountWriter(tx: Prisma.TransactionClient, sessionId: string, userId: string) {
