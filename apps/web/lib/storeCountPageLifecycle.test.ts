@@ -33,9 +33,9 @@ vi.mock("./auth-context", () => ({
   useAuth: () => ({ user: mocks.user, loading: false }),
 }));
 vi.mock("./toast-context", () => ({ useToast: () => ({ show: mocks.show }) }));
-vi.mock("./barcodeScanner", () => ({
+vi.mock("./barcodeScanner", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./barcodeScanner")>(),
   createScanHints: vi.fn(async () => new Map()),
-  isQrScanFormat: (format: number) => format === 11,
   SCAN_VIDEO_CONSTRAINTS: {},
 }));
 vi.mock("./scannerEngine", async (importOriginal) => ({
@@ -756,6 +756,47 @@ describe("Store Count pending-item lifecycle", () => {
 
     expect(mocks.apiJson.mock.calls.some(([url]) => String(url).includes("/api/products/by-barcode/"))).toBe(false);
     expect(container.textContent).not.toContain("Product not recognized");
+  });
+
+  it("rejects an invalid UPC check digit before product lookup", async () => {
+    await renderPage();
+
+    await act(async () => mocks.cameraCallback?.({
+      getText: () => "036000291453",
+      getBarcodeFormat: () => 14,
+    }));
+
+    expect(mocks.apiJson.mock.calls.some(([url]) => String(url).includes("/api/products/by-barcode/"))).toBe(false);
+  });
+
+  it("looks up an EAN-13 encoded UPC-A by its canonical 12-digit UPC", async () => {
+    await renderPage();
+    mocks.apiJson.mockImplementation(async (url: string) => {
+      if (url === "/api/products/by-barcode/036000291452") return product("product-a", "036000291452", "Test product");
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    await act(async () => mocks.cameraCallback?.({
+      getText: () => "0036000291452",
+      getBarcodeFormat: () => 7,
+    }));
+
+    expect(mocks.apiJson).toHaveBeenCalledWith("/api/products/by-barcode/036000291452", expect.any(Object));
+  });
+
+  it("looks up a compressed UPC-E cosmetic label by its expanded UPC-A value", async () => {
+    await renderPage();
+    mocks.apiJson.mockImplementation(async (url: string) => {
+      if (url === "/api/products/by-barcode/042000001007") return product("product-a", "042000001007", "Compact cosmetic");
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    await act(async () => mocks.cameraCallback?.({
+      getText: () => "04210007",
+      getBarcodeFormat: () => 15,
+    }));
+
+    expect(mocks.apiJson).toHaveBeenCalledWith("/api/products/by-barcode/042000001007", expect.any(Object));
   });
 
   it("escalates scanner help over time and resets it after an item is cancelled", async () => {

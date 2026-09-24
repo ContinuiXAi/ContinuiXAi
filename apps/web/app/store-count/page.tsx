@@ -6,7 +6,7 @@ import { BrowserCodeReader, BrowserMultiFormatReader, type IScannerControls } fr
 import { apiFetch, apiJson, ApiError } from "../../lib/api";
 import { useAuth } from "../../lib/auth-context";
 import { useToast } from "../../lib/toast-context";
-import { createScanHints, isQrScanFormat, SCAN_VIDEO_CONSTRAINTS } from "../../lib/barcodeScanner";
+import { createScanHints, isQrScanFormat, normalizeBarcodeFromScanFormat, SCAN_VIDEO_CONSTRAINTS } from "../../lib/barcodeScanner";
 import { shouldAcceptCameraScan, shouldUseZxingCamera } from "../../lib/cameraScanGuard";
 import { CAMERA_BARCODE_MISSING_EVENT, setRetailCapturePaused, type CameraScanDetail } from "../../lib/storeCountScannerControl";
 import { describeScannerStatus, getScannerGuidance, mapRetailScannerFocusToDisplay, markCameraReady, readRetailScannerStatus, type ScannerStatus } from "../../lib/scannerEngine";
@@ -476,7 +476,8 @@ export default function StoreCountPage() {
               return;
             }
             if (isQrScanFormat(result.getBarcodeFormat())) return;
-            const value = result.getText().trim();
+            const value = normalizeBarcodeFromScanFormat(result.getText(), result.getBarcodeFormat());
+            if (!value) return;
             if (rapidModeRef.current) rapidLastSeen = { value, at: Date.now() };
             void handleCameraBarcode(value);
           },

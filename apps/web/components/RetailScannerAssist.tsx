@@ -3,8 +3,9 @@
 import { useEffect, useRef } from "react";
 import { CAMERA_BARCODE_MISSING_EVENT, readRetailCaptureControl, RETAIL_CAPTURE_CONTROL_EVENT, type CameraScanDetail } from "../lib/storeCountScannerControl";
 import {
-  getRetailScannerFocusRegion,
+  getRetailScannerCapturePlan,
   loadRetailScanner,
+  normalizeRetailBarcode,
   publishRetailScannerStatus,
   RETAIL_FRAME_MAX_WIDTH,
   retailDecodeConfig,
@@ -28,10 +29,10 @@ function markRetailScannerReady() {
   window.dispatchEvent(new Event(RETAIL_SCANNER_READY_EVENT));
 }
 
-export function captureFrame(video: HTMLVideoElement, canvas: HTMLCanvasElement) {
+export function captureFrame(video: HTMLVideoElement, canvas: HTMLCanvasElement, attempt = 0) {
   if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || video.videoWidth < 2 || video.videoHeight < 2) return null;
 
-  const region = getRetailScannerFocusRegion(video.videoWidth, video.videoHeight);
+  const region = getRetailScannerCapturePlan(video.videoWidth, video.videoHeight, attempt);
   const scale = Math.min(1, RETAIL_FRAME_MAX_WIDTH / region.sw);
   const width = Math.max(2, Math.round(region.sw * scale));
   const height = Math.max(2, Math.round(region.sh * scale));
@@ -40,7 +41,10 @@ export function captureFrame(video: HTMLVideoElement, canvas: HTMLCanvasElement)
   const context = canvas.getContext("2d", { willReadFrequently: true });
   if (!context) return null;
 
+  const priorFilter = context.filter;
+  if (region.contrast) context.filter = "grayscale(1) contrast(1.45)";
   context.drawImage(video, region.sx, region.sy, region.sw, region.sh, 0, 0, width, height);
+  context.filter = priorFilter;
   return canvas.toDataURL("image/jpeg", 0.9);
 }
 
@@ -48,6 +52,7 @@ export function RetailScannerAssist() {
   const decodingRef = useRef(false);
   const lastSeenRef = useRef<{ value: string; at: number } | null>(null);
   const armedValueRef = useRef<string | null>(null);
+  const captureAttemptRef = useRef(0);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -81,7 +86,9 @@ export function RetailScannerAssist() {
         const video = document.querySelector<HTMLVideoElement>(".scanner-frame video");
         if (!video || !video.srcObject) return;
 
-        const frame = captureFrame(video, canvas);
+        const attempt = captureAttemptRef.current;
+        captureAttemptRef.current = (attempt + 1) % 3;
+        const frame = captureFrame(video, canvas, attempt);
         if (!frame) return;
         decodingRef.current = true;
 
@@ -90,7 +97,10 @@ export function RetailScannerAssist() {
           if (cancelled || readRetailCaptureControl(window)?.generation !== capture.generation) return;
 
           const now = Date.now();
-          const value = result?.codeResult?.code?.trim() ?? "";
+          const value = normalizeRetailBarcode(
+            result?.codeResult?.code ?? "",
+            result?.codeResult?.format,
+          ) ?? "";
           if (!value) {
             if (lastSeenRef.current && now - lastSeenRef.current.at >= REARM_AFTER_MISSING_MS) {
               window.dispatchEvent(new CustomEvent(CAMERA_BARCODE_MISSING_EVENT, { detail: { value: lastSeenRef.current.value } }));
@@ -118,6 +128,7 @@ export function RetailScannerAssist() {
       decodingRef.current = false;
       lastSeenRef.current = null;
       armedValueRef.current = null;
+      captureAttemptRef.current = 0;
       (window as ScannerWindow).__continuixRetailScannerReady = false;
     };
   }, []);
