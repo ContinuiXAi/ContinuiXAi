@@ -107,6 +107,7 @@ function isQueuedDeltaForEntry(scan: QueuedCountScan, sessionId: string, entry: 
 export default function StoreCountPage() {
   const router = useRouter();
   const { user, loading } = useAuth();
+  const canManageCountSetup = user?.role === "ADMIN" || user?.taskManager === true;
   const { show } = useToast();
   const replayOwnerRef = useRef(user?.id);
   replayOwnerRef.current = user?.id;
@@ -1166,7 +1167,16 @@ export default function StoreCountPage() {
         {session.status === "ACTIVE" && <>
           {countRouteStatus === "loading" && <p role="status">Loading assigned count route… Counting will be available when the location is ready.</p>}
           {countRouteStatus === "error" && <section role="alert"><p>{countRouteError}</p><p>Your count is saved. Retry the route before continuing.</p><button type="button" onClick={() => void loadManagedCountRoute(session)}>Retry route</button></section>}
-          {countRouteStatus === "empty" && <p>No count locations are assigned. Ask your supervisor to assign locations before counting.</p>}
+          {countRouteStatus === "empty" && <section className="card" style={{ padding: 16 }}>
+            <h2>No count locations are assigned</h2>
+            {canManageCountSetup && session.siteId ? <>
+              <p>Choose the products and store locations this count should cover.</p>
+              <a className="button" style={{ display: "grid", placeItems: "center", minHeight: 48, textDecoration: "none" }} href={`/store-count/setup?sessionId=${encodeURIComponent(session.id)}&siteId=${encodeURIComponent(session.siteId)}`}>Set up count locations</a>
+            </> : <>
+              <p>Your supervisor needs to assign locations before counting.</p>
+              <a className="button secondary" style={{ display: "grid", placeItems: "center", minHeight: 48, textDecoration: "none" }} href="/my-work">Return to My Work</a>
+            </>}
+          </section>}
           {countRouteStatus === "complete" && <section className="card" style={{ padding: 16 }}><h2>All assigned locations are checked</h2><p>Review your results, then finish and lock this count.</p><button className="secondary" type="button" onClick={() => setReviewPickerOpen(!reviewPickerOpen)}>Review locations</button>{reviewPickerOpen && countRoute?.locations.map((location) => <button key={location.id} type="button" className="secondary" onClick={() => {
             locationIdRef.current = location.id;
             setLocationId(location.id);

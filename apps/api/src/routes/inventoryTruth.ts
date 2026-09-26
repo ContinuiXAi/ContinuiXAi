@@ -210,6 +210,9 @@ export async function inventoryTruthRoutes(app: FastifyInstance) {
     const result = await prisma.$transaction(async (tx) => {
       const site = await lockSiteAndMembership(tx, userId, siteId, "update");
       if (!site) return { status: "forbidden" as const };
+      if (!["OWNER", "ADMIN", "MANAGER"].includes(site.organizationRole)) {
+        return { status: "manager-required" as const };
+      }
 
       const product = await tx.product.findFirst({
         where: { id: productId, organizationId: site.organizationId, isActive: true },
@@ -240,6 +243,9 @@ export async function inventoryTruthRoutes(app: FastifyInstance) {
     });
     if (result.status === "forbidden") {
       return reply.code(403).send({ error: "you do not have access to that site" });
+    }
+    if (result.status === "manager-required") {
+      return reply.code(403).send({ error: "manager access is required to assign count locations" });
     }
     if (result.status === "product-not-found") {
       return reply.code(404).send({ error: "product not found" });

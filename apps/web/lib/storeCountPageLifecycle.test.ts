@@ -7,7 +7,7 @@ const mocks = vi.hoisted(() => ({
   apiFetch: vi.fn(),
   push: vi.fn(),
   show: vi.fn(),
-  user: { id: "employee-a" } as { id: string },
+  user: { id: "employee-a", role: "GENERAL", taskManager: false } as { id: string; role?: "ADMIN" | "GENERAL"; taskManager?: boolean },
   createCountScanId: vi.fn(),
   enqueueCountScan: vi.fn(),
   cameraCallback: null as null | ((result?: { getText: () => string; getBarcodeFormat: () => number }) => void),
@@ -193,7 +193,7 @@ describe("Store Count pending-item lifecycle", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     idSequence = 0;
-    mocks.user = { id: "employee-a" };
+    mocks.user = { id: "employee-a", role: "GENERAL", taskManager: false };
     mocks.cameraCallback = null;
     localStorage.clear();
     mocks.persistedScannerStatus = null;
@@ -1129,6 +1129,24 @@ describe("Store Count pending-item lifecycle", () => {
     await renderPage(managed, { sessionId: managed.id, expectedProducts: 0, locations: [] });
     expect(container.textContent).toContain("No count locations are assigned");
     expect(container.querySelector('[aria-label="Count location"]')).toBeNull();
+  });
+
+  it("gives a manager a direct setup action from an empty managed count", async () => {
+    mocks.user = { id: "manager-a", role: "GENERAL", taskManager: true };
+    const managed = { ...countSession("managed-empty"), siteId: "site-a" };
+    await renderPage(managed, { sessionId: managed.id, expectedProducts: 0, locations: [] });
+
+    const setup = container.querySelector<HTMLAnchorElement>('a[href^="/store-count/setup"]');
+    expect(setup?.getAttribute("href")).toBe("/store-count/setup?sessionId=managed-empty&siteId=site-a");
+    expect(setup?.textContent).toContain("Set up count locations");
+  });
+
+  it("does not offer count setup to an employee without manager permission", async () => {
+    const managed = { ...countSession("managed-empty"), siteId: "site-a" };
+    await renderPage(managed, { sessionId: managed.id, expectedProducts: 0, locations: [] });
+
+    expect(container.querySelector('a[href^="/store-count/setup"]')).toBeNull();
+    expect(container.querySelector<HTMLAnchorElement>('a[href="/my-work"]')?.textContent).toContain("Return to My Work");
   });
 
   it("keeps compact selected-product evidence above quantity confirmation and returns focus after cancel and save", async () => {
