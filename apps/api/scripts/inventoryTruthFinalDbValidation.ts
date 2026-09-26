@@ -198,23 +198,37 @@ async function main() {
     // the exact midpoint: the real HTTP route must wait on Organization before
     // it can lock the recipient User, allowing the FK update to finish first.
     const crossRoute = await count(await product());
-    await holder.query("BEGIN");
+    // Count-location assignments are manager configuration. Temporarily grant
+    // the recipient the minimum production role required by that route, then
+    // restore the inventory-worker fixture before the remaining policy checks.
+    await prisma.organizationMembership.update({
+      where: { organizationId_userId: { organizationId: org.id, userId: b.id } },
+      data: { role: "MANAGER" },
+    });
     try {
-      await holder.query('SELECT "id" FROM "Organization" WHERE "id" = $1 FOR SHARE', [org.id]);
-      const hintRequest = send(b.id, "POST", `/truth/products/${crossRoute.item.id}/location-hints`, {
-        siteId: site.id,
-        locationId: location.id,
-        evidence: "ASSIGNED",
-        isRequired: true,
+      await holder.query("BEGIN");
+      try {
+        await holder.query('SELECT "id" FROM "Organization" WHERE "id" = $1 FOR SHARE', [org.id]);
+        const hintRequest = send(b.id, "POST", `/truth/products/${crossRoute.item.id}/location-hints`, {
+          siteId: site.id,
+          locationId: location.id,
+          evidence: "ASSIGNED",
+          isRequired: true,
+        });
+        await waitForBlockedQuery('FROM "Organization"');
+        await holder.query('UPDATE "StoreCountSession" SET "assignedToId" = $1 WHERE "id" = $2', [b.id, crossRoute.session.id]);
+        await holder.query("COMMIT");
+        const hintResponse = await hintRequest;
+        assert.equal(hintResponse.statusCode, 201, hintResponse.body);
+      } catch (error) {
+        await holder.query("ROLLBACK");
+        throw error;
+      }
+    } finally {
+      await prisma.organizationMembership.update({
+        where: { organizationId_userId: { organizationId: org.id, userId: b.id } },
+        data: { role: "INVENTORY" },
       });
-      await waitForBlockedQuery('FROM "Organization"');
-      await holder.query('UPDATE "StoreCountSession" SET "assignedToId" = $1 WHERE "id" = $2', [b.id, crossRoute.session.id]);
-      await holder.query("COMMIT");
-      const hintResponse = await hintRequest;
-      assert.equal(hintResponse.statusCode, 201, hintResponse.body);
-    } catch (error) {
-      await holder.query("ROLLBACK");
-      throw error;
     }
     assert.equal((await cancel(crossRoute, b.id)).statusCode, 200);
 
