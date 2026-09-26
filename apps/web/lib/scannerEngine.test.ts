@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as scannerEngine from "./scannerEngine";
 import {
   getRetailScannerFocusRegion,
+  getRetailScannerCapturePlan,
   mapRetailScannerFocusToDisplay,
   getScannerGuidance,
   preferredScannerEngine,
@@ -11,6 +12,7 @@ import {
   retailDecodeConfig,
   SCANNER_FRAME_INTERVAL_MS,
   shouldEmitRetailScan,
+  normalizeRetailBarcode,
 } from "./scannerEngine";
 
 afterEach(() => {
@@ -50,6 +52,43 @@ describe("retail scanner engine", () => {
       sw: 973,
       sh: 302,
     });
+  });
+
+  it("alternates normal, tighter, and contrast-enhanced focused capture plans", () => {
+    expect(getRetailScannerCapturePlan(1280, 720, 0)).toEqual({
+      sx: 154, sy: 209, sw: 973, sh: 302, contrast: false,
+    });
+    expect(getRetailScannerCapturePlan(1280, 720, 1)).toEqual({
+      sx: 243, sy: 238, sw: 794, sh: 245, contrast: false,
+    });
+    expect(getRetailScannerCapturePlan(1280, 720, 2)).toEqual({
+      sx: 154, sy: 209, sw: 973, sh: 302, contrast: true,
+    });
+    expect(getRetailScannerCapturePlan(1280, 720, 3)).toEqual(getRetailScannerCapturePlan(1280, 720, 0));
+  });
+
+  it("accepts valid retail checksums and canonicalizes EAN-13 encoded UPC-A", () => {
+    expect(normalizeRetailBarcode("036000291452", "upc_a")).toBe("036000291452");
+    expect(normalizeRetailBarcode("0036000291452", "ean_13")).toBe("036000291452");
+    expect(normalizeRetailBarcode("96385074", "ean_8")).toBe("96385074");
+    expect(normalizeRetailBarcode("ABC-123", "code_128")).toBe("ABC-123");
+  });
+
+  it("validates compressed UPC-E and expands it to the catalog's UPC-A value", () => {
+    expect(normalizeRetailBarcode("04210007", "upc_e")).toBe("042000001007");
+    expect(normalizeRetailBarcode("01234531", "upc_e")).toBe("012300000451");
+    expect(normalizeRetailBarcode("01234543", "upc_e")).toBe("012340000053");
+    expect(normalizeRetailBarcode("01234558", "upc_e")).toBe("012345000058");
+    expect(normalizeRetailBarcode("11234502", "upc_e")).toBe("112000003452");
+    expect(normalizeRetailBarcode("04210008", "upc_e")).toBeNull();
+    expect(normalizeRetailBarcode("21234558", "upc_e")).toBeNull();
+  });
+
+  it("rejects corrupted UPC/EAN camera reads instead of looking up the wrong product", () => {
+    expect(normalizeRetailBarcode("036000291453", "upc_a")).toBeNull();
+    expect(normalizeRetailBarcode("0036000291453", "ean_13")).toBeNull();
+    expect(normalizeRetailBarcode("96385075", "ean_8")).toBeNull();
+    expect(normalizeRetailBarcode("0360O0291452", "upc_a")).toBeNull();
   });
 
   it("maps the decoded region onto a landscape video displayed with cover scaling", () => {

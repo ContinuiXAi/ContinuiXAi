@@ -59,6 +59,66 @@ export function getRetailScannerFocusRegion(width: number, height: number) {
   };
 }
 
+export function getRetailScannerCapturePlan(width: number, height: number, attempt: number) {
+  const variant = ((attempt % 3) + 3) % 3;
+  const [widthRatio, heightRatio, contrast] = variant === 1
+    ? [0.62, 0.34, false] as const
+    : variant === 2
+      ? [0.76, 0.42, true] as const
+      : [0.76, 0.42, false] as const;
+  const sw = Math.max(1, Math.round(width * widthRatio));
+  const sh = Math.max(1, Math.round(height * heightRatio));
+  return {
+    sx: Math.max(0, Math.round((width - sw) / 2)),
+    sy: Math.max(0, Math.round((height - sh) / 2)),
+    sw,
+    sh,
+    contrast,
+  };
+}
+
+function hasValidRetailCheckDigit(value: string) {
+  if (!/^\d+$/.test(value) || value.length < 2) return false;
+  let sum = 0;
+  for (let index = 0; index < value.length - 1; index += 1) {
+    const distanceFromCheck = value.length - 1 - index;
+    sum += Number(value[index]) * (distanceFromCheck % 2 === 1 ? 3 : 1);
+  }
+  return (10 - (sum % 10)) % 10 === Number(value.at(-1));
+}
+
+function expandUpcEToUpcA(value: string) {
+  if (!/^[01]\d{7}$/.test(value)) return null;
+  const numberSystem = value[0];
+  const compressed = value.slice(1, 7);
+  const checkDigit = value[7];
+  const lastCompressedDigit = compressed[5];
+  let body: string;
+
+  if (["0", "1", "2"].includes(lastCompressedDigit)) {
+    body = `${numberSystem}${compressed.slice(0, 2)}${lastCompressedDigit}0000${compressed.slice(2, 5)}`;
+  } else if (lastCompressedDigit === "3") {
+    body = `${numberSystem}${compressed.slice(0, 3)}00000${compressed.slice(3, 5)}`;
+  } else if (lastCompressedDigit === "4") {
+    body = `${numberSystem}${compressed.slice(0, 4)}00000${compressed[4]}`;
+  } else {
+    body = `${numberSystem}${compressed.slice(0, 5)}0000${lastCompressedDigit}`;
+  }
+
+  const expanded = `${body}${checkDigit}`;
+  return hasValidRetailCheckDigit(expanded) ? expanded : null;
+}
+
+export function normalizeRetailBarcode(value: string, format?: string) {
+  const trimmed = value.trim();
+  const normalizedFormat = format?.toLowerCase().replaceAll("-", "_");
+  if (normalizedFormat === "upc_e") return expandUpcEToUpcA(trimmed);
+  if (!["upc_a", "ean_13", "ean_8"].includes(normalizedFormat ?? "")) return trimmed || null;
+  const expectedLength = normalizedFormat === "ean_8" ? 8 : normalizedFormat === "ean_13" ? 13 : 12;
+  if (trimmed.length !== expectedLength || !hasValidRetailCheckDigit(trimmed)) return null;
+  return normalizedFormat === "ean_13" && trimmed.startsWith("0") ? trimmed.slice(1) : trimmed;
+}
+
 export function mapRetailScannerFocusToDisplay(
   sourceWidth: number,
   sourceHeight: number,
