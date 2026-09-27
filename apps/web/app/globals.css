@@ -1407,3 +1407,12 @@ th {
   .manager-report-controls { grid-template-columns: 1fr; }
   .work-hero-actions > *, .work-footer-actions > * { flex: 1 1 140px; }
 }
+
+@media print {
+  body { background: #fff !important; color: #000 !important; }
+  .mfa-backup-document { color: #000 !important; }
+  .mfa-backup-document dl,
+  .mfa-backup-code { border-color: #555 !important; background: #fff !important; color: #000 !important; }
+  .mfa-backup-warning { border-color: #555 !important; background: #fff !important; color: #000 !important; }
+  .mfa-backup-actions { display: none !important; }
+}

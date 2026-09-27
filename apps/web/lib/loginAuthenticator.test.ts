@@ -93,4 +93,42 @@ describe("Google Authenticator sign-in", () => {
     expect(mocks.fetch).toHaveBeenCalledTimes(2);
     expect(mocks.fetch).not.toHaveBeenCalledWith(expect.stringContaining("/mfa/setup"), expect.anything());
   });
+
+  it("labels the backup-code record with the account holder, login, company, and generation time", async () => {
+    await renderSignIn();
+    await submitCredentials(true);
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      token: "session-token",
+      user: {
+        id: "user-1",
+        name: "Mitchell Kobran",
+        email: "mitchell@josephs.example",
+        employeeNumber: "CX-1001",
+        role: "ADMIN",
+        mfaEnabled: true,
+      },
+      backupCodes: ["CODE-ONE", "CODE-TWO"],
+      backupCodeDocument: {
+        accountHolderName: "Mitchell Kobran",
+        loginEmail: "mitchell@josephs.example",
+        employeeNumber: "CX-1001",
+        organizations: [{ id: "organization-1", name: "Josephs Markets" }],
+        generatedAt: "2026-09-27T15:30:00.000Z",
+      },
+    }), { status: 200 }));
+    const codeInput = container.querySelector<HTMLInputElement>('input[aria-label="6-digit verification code"]')!;
+    await changeValue(codeInput, "123456");
+    await act(async () => {
+      container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await settle();
+
+    expect(container.textContent).toContain("MFA Emergency Backup Codes");
+    expect(container.textContent).toContain("Mitchell Kobran");
+    expect(container.textContent).toContain("mitchell@josephs.example");
+    expect(container.textContent).toContain("Josephs Markets");
+    expect(container.textContent).toContain("CX-1001");
+    expect(container.querySelector('time[datetime="2026-09-27T15:30:00.000Z"]')).not.toBeNull();
+    expect(container.textContent).toContain("Each backup code works only once");
+  });
 });

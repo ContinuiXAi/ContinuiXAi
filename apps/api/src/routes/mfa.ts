@@ -68,12 +68,31 @@ export async function mfaRoutes(app: FastifyInstance) {
     const counter = findTotpCounter(secret, code);
     if (counter === null) return reply.code(401).send({ error: "That verification code is not correct." });
 
+    // Load printable identity data before the one-way enrollment update. If this
+    // read fails, the user can retry setup instead of enabling MFA without ever
+    // receiving an attributable copy of the newly generated backup codes.
+    const memberships = await prisma.organizationMembership.findMany({
+      where: { userId: user.id, isActive: true, organization: { isActive: true } },
+      orderBy: { createdAt: "asc" },
+      select: { organization: { select: { id: true, name: true } } },
+    });
+
     const backupCodes = generateBackupCodes();
     const hashes = await hashBackupCodes(backupCodes);
     const accepted = await prisma.user.updateMany({ where: { id: user.id, tokenVersion: user.tokenVersion, mfaEnabled: false }, data: { mfaEnabled: true, mfaBackupCodeHashes: hashes, mfaLastTotpCounter: counter, tokenVersion: { increment: 1 } } });
     if (accepted.count !== 1) return reply.code(409).send({ error: "Authenticator setup was already completed. Sign in again." });
     const updated = await prisma.user.findUniqueOrThrow({ where: { id: user.id } });
-    return { ...await sessionResponse(app, reply, updated), backupCodes };
+    return {
+      ...await sessionResponse(app, reply, updated),
+      backupCodes,
+      backupCodeDocument: {
+        accountHolderName: updated.name,
+        loginEmail: updated.email,
+        employeeNumber: updated.employeeNumber,
+        organizations: memberships.map((membership) => membership.organization),
+        generatedAt: new Date().toISOString(),
+      },
+    };
   });
 
   app.post("/mfa/verify", { config: { rateLimit: { max: 10, timeWindow: "15 minutes" } } }, async (request, reply) => {
