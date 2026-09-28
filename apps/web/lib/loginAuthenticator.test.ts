@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act, createElement, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -34,10 +36,14 @@ async function changeValue(element: HTMLInputElement, value: string) {
 describe("authenticator app sign-in", () => {
   let container: HTMLDivElement;
   let root: Root;
+  let stylesheet: HTMLStyleElement;
 
   beforeEach(() => {
     vi.clearAllMocks();
     vi.stubGlobal("fetch", mocks.fetch);
+    stylesheet = document.createElement("style");
+    stylesheet.textContent = readFileSync(resolve(process.cwd(), "app/globals.css"), "utf8");
+    document.head.appendChild(stylesheet);
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -46,6 +52,7 @@ describe("authenticator app sign-in", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
+    stylesheet.remove();
     vi.unstubAllGlobals();
   });
 
@@ -96,6 +103,7 @@ describe("authenticator app sign-in", () => {
       expect(link?.getAttribute("href")).toBe(href);
       expect(link?.getAttribute("target")).toBe("_blank");
       expect(link?.getAttribute("rel")).toBe("noopener noreferrer");
+      expect(getComputedStyle(link!).paddingTop).toBe("12px");
     }
   });
 

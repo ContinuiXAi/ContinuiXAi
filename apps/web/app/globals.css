@@ -203,7 +203,8 @@ select {
   background-position: right 14px center;
 }
 
-button {
+button,
+a.button {
   font-size: 1rem;
   padding: 12px 16px;
   border-radius: 10px;
@@ -214,7 +215,8 @@ button {
   min-height: 44px;
 }
 
-button.secondary {
+button.secondary,
+a.button.secondary {
   background: var(--color-surface-hover);
   color: var(--color-text);
   border: 1px solid var(--color-border);
