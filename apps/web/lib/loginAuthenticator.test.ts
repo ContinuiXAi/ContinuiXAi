@@ -31,7 +31,7 @@ async function changeValue(element: HTMLInputElement, value: string) {
   });
 }
 
-describe("Google Authenticator sign-in", () => {
+describe("authenticator app sign-in", () => {
   let container: HTMLDivElement;
   let root: Root;
 
@@ -75,13 +75,28 @@ describe("Google Authenticator sign-in", () => {
     await settle();
   }
 
-  it("uses a manual Google Authenticator setup key without displaying a QR code", async () => {
+  it("recommends Proton across phone and desktop without locking out other authenticator apps", async () => {
     await renderSignIn();
     await submitCredentials(true);
 
-    expect(container.textContent).toContain("Google Authenticator");
+    expect(container.textContent).toContain("Proton Authenticator");
+    expect(container.textContent).toContain("Recommended");
+    expect(container.textContent).toContain("Already have another authenticator app?");
     expect(container.textContent).toContain("JBSWY3DPEHPK3PXP");
     expect(container.querySelector('img[alt*="QR"]')).toBeNull();
+
+    const expectedDownloads = [
+      ["Download for iPhone or iPad", "https://apps.apple.com/us/app/proton-authenticator/id6741758667"],
+      ["Download for Android", "https://play.google.com/store/apps/details?id=proton.android.authenticator"],
+      ["Download for Windows, Mac, or Linux", "https://proton.me/authenticator/download"],
+    ];
+    for (const [label, href] of expectedDownloads) {
+      const link = Array.from(container.querySelectorAll<HTMLAnchorElement>("a"))
+        .find((candidate) => candidate.textContent?.includes(label));
+      expect(link?.getAttribute("href")).toBe(href);
+      expect(link?.getAttribute("target")).toBe("_blank");
+      expect(link?.getAttribute("rel")).toBe("noopener noreferrer");
+    }
   });
 
   it("asks an enrolled user only for the current authenticator code", async () => {

@@ -136,7 +136,31 @@ export default function LoginPage() {
   async function finishEnrollment() { await login(pendingToken); router.push("/"); }
 
   if (checkingBootstrap) return <AuthShell><p style={taglineStyle}>Connecting securely...</p></AuthShell>;
-  if (stage === "setup") return <AuthShell><h1 style={brandStyle}>Secure Your Account</h1><p style={helperStyle}>Open Google Authenticator, tap <strong>+</strong>, choose <strong>Enter a setup key</strong>, and enter the key below. Then enter the 6-digit code Google Authenticator shows.</p><p style={{ ...helperStyle, marginBottom: 6 }}><strong>Google Authenticator setup key</strong></p><code style={{ wordBreak: "break-all", fontSize: 13 }}>{manualSecret}</code><form onSubmit={confirmEnrollment} className="form" style={{ marginTop: 18 }}><input style={fieldStyle} inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]*" maxLength={6} placeholder="6-digit verification code" aria-label="6-digit verification code" value={mfaCode} onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, "").slice(0, 6))} required /><button type="submit" disabled={loading || mfaCode.length !== 6}>{loading ? "Verifying..." : "Verify and Enable MFA"}</button>{error && <p className="error-text" role="alert">{error}</p>}</form></AuthShell>;
+  if (stage === "setup") return <AuthShell>
+    <h1 style={brandStyle}>Secure Your Account</h1>
+    <p style={{ ...helperStyle, marginTop: 8 }}>Use any authenticator app. We recommend Proton Authenticator because it works on both phones and computers.</p>
+    <section aria-labelledby="recommended-authenticator" style={{ padding: 14, border: "1px solid var(--color-border)", borderRadius: 12, marginBottom: 18 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 6 }}>
+        <h2 id="recommended-authenticator" style={{ ...titleStyle, margin: 0, fontSize: 17 }}>Proton Authenticator</h2>
+        <span style={{ padding: "3px 8px", borderRadius: 999, background: "var(--color-surface-hover)", color: "var(--color-text-secondary)", fontSize: 12, fontWeight: 700 }}>Recommended</span>
+      </div>
+      <p style={helperStyle}>Choose your device. The download opens separately so you can return here and finish setup.</p>
+      <div style={{ display: "grid", gap: 9 }}>
+        <a className="button" href="https://apps.apple.com/us/app/proton-authenticator/id6741758667" target="_blank" rel="noopener noreferrer" style={{ minHeight: 46, display: "grid", placeItems: "center", textAlign: "center", textDecoration: "none" }}>Download for iPhone or iPad</a>
+        <a className="button" href="https://play.google.com/store/apps/details?id=proton.android.authenticator" target="_blank" rel="noopener noreferrer" style={{ minHeight: 46, display: "grid", placeItems: "center", textAlign: "center", textDecoration: "none" }}>Download for Android</a>
+        <a className="button secondary" href="https://proton.me/authenticator/download" target="_blank" rel="noopener noreferrer" style={{ minHeight: 46, display: "grid", placeItems: "center", textAlign: "center", textDecoration: "none" }}>Download for Windows, Mac, or Linux</a>
+      </div>
+    </section>
+    <p style={{ ...helperStyle, marginBottom: 8 }}><strong>Already have another authenticator app?</strong> You can use it instead.</p>
+    <p style={helperStyle}>In Proton Authenticator or your chosen app, add an account using a setup key. Enter the key below, then enter the 6-digit code the app shows.</p>
+    <p style={{ ...helperStyle, marginBottom: 6 }}><strong>{BRAND_NAME} setup key</strong></p>
+    <code style={{ wordBreak: "break-all", fontSize: 13 }}>{manualSecret}</code>
+    <form onSubmit={confirmEnrollment} className="form" style={{ marginTop: 18 }}>
+      <input style={fieldStyle} inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]*" maxLength={6} placeholder="6-digit verification code" aria-label="6-digit verification code" value={mfaCode} onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, "").slice(0, 6))} required />
+      <button type="submit" disabled={loading || mfaCode.length !== 6}>{loading ? "Verifying..." : "Verify and Enable MFA"}</button>
+      {error && <p className="error-text" role="alert">{error}</p>}
+    </form>
+  </AuthShell>;
   if (stage === "verify") return <AuthShell><h1 style={brandStyle}>Multi-Factor Verification</h1><p style={helperStyle}>Enter the 6-digit code from your authenticator app, or use a backup code.</p><form onSubmit={verifyMfa} className="form"><input style={fieldStyle} autoFocus autoComplete="one-time-code" placeholder="6-digit code or backup code" aria-label="6-digit code or backup code" value={mfaCode} onChange={(e) => setMfaCode(e.target.value.toUpperCase())} required /><button type="submit" disabled={loading}>{loading ? "Verifying..." : "Verify & Sign In"}</button>{error && <p className="error-text" role="alert">{error}</p>}</form><button type="button" className="secondary" onClick={() => { setStage("password"); setMfaCode(""); setPassword(""); }} style={{ marginTop: 12, width: "100%" }}>Back to Sign In</button></AuthShell>;
   if (stage === "backup") {
     const organizationNames = backupCodeDocument?.organizations.map((organization) => organization.name) ?? [];
