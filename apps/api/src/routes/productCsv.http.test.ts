@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   transactionExecuteRaw: vi.fn(),
   transactionProductFindMany: vi.fn(),
   transactionProductCreateMany: vi.fn(),
+  transactionProductIdentifierCreateMany: vi.fn(),
 }));
 
 vi.mock("../lib/prisma.js", () => ({
@@ -63,6 +64,7 @@ describe("product CSV tenant-safe onboarding", () => {
       $queryRaw: mocks.transactionQueryRaw,
       $executeRaw: mocks.transactionExecuteRaw,
       product: { findMany: mocks.transactionProductFindMany, createMany: mocks.transactionProductCreateMany },
+      productIdentifier: { createMany: mocks.transactionProductIdentifierCreateMany },
       category: { findMany: mocks.categoryFindMany },
     }));
     mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
@@ -75,6 +77,7 @@ describe("product CSV tenant-safe onboarding", () => {
     mocks.transactionExecuteRaw.mockResolvedValue(1);
     mocks.transactionProductFindMany.mockResolvedValue([]);
     mocks.transactionProductCreateMany.mockResolvedValue({ count: 1 });
+    mocks.transactionProductIdentifierCreateMany.mockResolvedValue({ count: 1 });
   });
 
   afterEach(() => vi.restoreAllMocks());
@@ -91,6 +94,149 @@ describe("product CSV tenant-safe onboarding", () => {
         { row: 3, status: "error", upc: "001234", name: "Cream" },
       ],
     });
+    await app.close();
+  });
+
+  it("normalizes safe UPC-E imports and blocks an equivalent legacy catalog row", async () => {
+    const app = await testApp();
+    const normalized = await preview(app, "upc,name\n04210007,Compact cosmetic\n");
+    expect(normalized.statusCode).toBe(200);
+    expect(normalized.json().rows[0].upc).toBe("042000001007");
+
+    mocks.productFindMany.mockResolvedValue([{ barcodeValue: "04210007", name: "Legacy compact cosmetic" }]);
+    const duplicate = await preview(app, "upc,name\n042000001007,Duplicate cosmetic\n");
+    expect(duplicate.statusCode).toBe(200);
+    expect(duplicate.json().rows[0].errors).toContain('UPC "042000001007" already exists in this organization.');
+    await app.close();
+  });
+
+  it("rejects a dual-valid 8-digit CSV value until its symbology is explicit", async () => {
+    const app = await testApp();
+
+    const response = await preview(app, "upc,name\n01234558,Ambiguous item\n");
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().rows[0].status).toBe("error");
+    expect(response.json().rows[0].errors.join(" ")).toMatch(/UPC-E.*EAN-8|EAN-8.*UPC-E/i);
+    await app.close();
+  });
+
+  it("accepts explicit EAN-8 and UPC-E CSV rows without conflating their distinct identities", async () => {
+    mocks.productFindMany.mockResolvedValue([{ barcodeValue: "012345000058", name: "Existing UPC-A", identifiers: [] }]);
+    const app = await testApp();
+
+    const ean8 = await preview(app, "upc,name,barcode_format\n01234558,EAN item,EAN_8\n");
+    expect(ean8.statusCode).toBe(200);
+    expect(ean8.json().rows[0]).toMatchObject({ status: "valid", upc: "01234558", barcodeFormat: "EAN_8", errors: [] });
+
+    mocks.productFindMany.mockResolvedValue([]);
+    const upcE = await preview(app, "upc,name,barcode_format\n01234558,UPC item,UPC_E\n");
+    expect(upcE.statusCode).toBe(200);
+    expect(upcE.json().rows[0]).toMatchObject({ status: "valid", upc: "012345000058", barcodeFormat: "UPC_A", errors: [] });
+    await app.close();
+  });
+
+  it("persists a typed UPC alias when committing an explicit UPC-E row", async () => {
+    const app = await testApp();
+    const reviewed = await preview(app, "upc,name,barcode_format\n01234558,UPC item,UPC_E\n");
+    mocks.transactionProductFindMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ id: "upc-product", barcodeValue: "012345000058" }]);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/products/import/commit",
+      payload: { previewId: reviewed.json().previewId, organizationId: "org-a" },
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(mocks.transactionProductIdentifierCreateMany).toHaveBeenCalledWith({
+      data: [{
+        organizationId: "org-a",
+        productId: "upc-product",
+        type: "UPC",
+        value: "01234558",
+        source: "CONTINUIXAI_BARCODE_ALIAS",
+      }],
+    });
+    await app.close();
+  });
+
+  it("persists explicit EAN-8 primary metadata for lossless export", async () => {
+    const app = await testApp();
+    const reviewed = await preview(app, "upc,name,barcode_format\n01234558,EAN item,EAN_8\n");
+    mocks.transactionProductFindMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ id: "ean-product", barcodeValue: "01234558" }]);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/products/import/commit",
+      payload: { previewId: reviewed.json().previewId, organizationId: "org-a" },
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(mocks.transactionProductIdentifierCreateMany).toHaveBeenCalledWith({
+      data: [{
+        organizationId: "org-a",
+        productId: "ean-product",
+        type: "EAN",
+        value: "01234558",
+        source: "CONTINUIXAI_BARCODE_PRIMARY",
+      }],
+    });
+    await app.close();
+  });
+
+  it("rejects an unsupported CSV barcode format with a row-level correction", async () => {
+    const app = await testApp();
+    const response = await preview(app, "upc,name,barcode_format\n01234558,Ambiguous item,QR\n");
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().rows[0].status).toBe("error");
+    expect(response.json().rows[0].errors.join(" ")).toMatch(/barcode_format.*UPC_E.*EAN_8/i);
+    await app.close();
+  });
+
+  it("blocks an imported UPC that already belongs to a retail ProductIdentifier", async () => {
+    mocks.productFindMany.mockResolvedValue([{
+      barcodeValue: null,
+      name: "Existing case product",
+      identifiers: [{ value: "04210007", type: "UPC" }],
+    }]);
+    const app = await testApp();
+
+    const response = await preview(app, "upc,name\n042000001007,Duplicate cosmetic\n");
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().rows[0].errors).toContain('UPC "042000001007" already exists in this organization.');
+    expect(mocks.productFindMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        organizationId: "org-a",
+        OR: expect.arrayContaining([
+          expect.objectContaining({ identifiers: expect.any(Object) }),
+        ]),
+      }),
+    }));
+    await app.close();
+  });
+
+  it("rechecks retail ProductIdentifiers at commit before writing the batch", async () => {
+    const app = await testApp();
+    const reviewed = await preview(app, "upc,name\n04210007,Compact cosmetic\n");
+    mocks.transactionProductFindMany.mockResolvedValue([{
+      barcodeValue: null,
+      identifiers: [{ value: "04210007", type: "UPC" }],
+    }]);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/products/import/commit",
+      payload: { previewId: reviewed.json().previewId, organizationId: "org-a" },
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(mocks.transactionProductCreateMany).not.toHaveBeenCalled();
     await app.close();
   });
 
@@ -122,11 +268,45 @@ describe("product CSV tenant-safe onboarding", () => {
     const maximum = await preview(app, maximumRows);
     expect(maximum.statusCode).toBe(200);
     expect(maximum.json().totals).toMatchObject({ rows: 10_000, valid: 10_000, errors: 0 });
+    const lookupBatchSizes = mocks.productFindMany.mock.calls.flatMap(([args]) => {
+      const where = args.where as {
+        OR?: Array<{ barcodeValue?: { in?: string[] } }>;
+        name?: { in?: string[] };
+      };
+      const barcodeValues = where.OR?.[0]?.barcodeValue?.in;
+      if (barcodeValues) return [barcodeValues.length];
+      if (where.name?.in) return [where.name.in.length];
+      return [];
+    });
+    expect(lookupBatchSizes.length).toBeGreaterThan(1);
+    expect(Math.max(...lookupBatchSizes)).toBeLessThanOrEqual(500);
 
     const tooManyRows = `upc,name\n${Array.from({ length: 10_001 }, (_, index) => `${index},Product ${index}`).join("\n")}`;
     const response = await preview(app, tooManyRows);
     expect(response.statusCode).toBe(400);
     expect(response.json().error).toMatch(/10,000 rows/i);
+    await app.close();
+  });
+
+  it("reviews 10,000 existing-name rows with indexed identity checks", async () => {
+    mocks.productFindMany.mockImplementation(async ({ where }: {
+      where: { OR?: unknown; name?: { in?: string[] } };
+    }) => {
+      if (where.OR) return [];
+      return (where.name?.in ?? []).map((name, index) => ({
+        id: `${name}-${index}`,
+        barcodeValue: `existing-${name}`,
+        name,
+        identifiers: [],
+      }));
+    });
+    const app = await testApp();
+    const csv = `upc,name\n${Array.from({ length: 10_000 }, (_, index) => `new-${index},Product ${index}`).join("\n")}`;
+
+    const response = await preview(app, csv);
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().totals).toEqual({ rows: 10_000, valid: 0, warnings: 10_000, errors: 0 });
     await app.close();
   });
 
@@ -387,6 +567,7 @@ describe("product CSV tenant-safe onboarding", () => {
       packageSize: null,
       category: { name: "Global legacy secret" },
       isActive: true,
+      identifiers: [],
     }]);
     const app = await testApp();
 
@@ -396,9 +577,64 @@ describe("product CSV tenant-safe onboarding", () => {
     expect(response.headers["content-type"]).toContain("text/csv");
     expect(response.body).toContain("'=HYPERLINK");
     expect(response.body).not.toContain("Global legacy secret");
-    expect(response.body).toContain(",,,,true\r\n");
-    expect(mocks.productFindMany).toHaveBeenCalledWith({ where: { organizationId: "org-a" }, orderBy: { name: "asc" } });
+    expect(response.body).toContain(",,,,true,\r\n");
+    expect(mocks.productFindMany).toHaveBeenCalledWith({
+      where: { organizationId: "org-a" },
+      orderBy: { name: "asc" },
+      include: {
+        identifiers: {
+          where: { source: { in: ["CONTINUIXAI_BARCODE_ALIAS", "CONTINUIXAI_BARCODE_PRIMARY"] } },
+          select: { type: true, value: true, source: true },
+        },
+      },
+    });
     expect(mocks.categoryFindMany).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("exports only verified barcode formats so legacy files can be safely re-imported", async () => {
+    mocks.productFindMany.mockResolvedValueOnce([
+      {
+        barcodeValue: "04210007",
+        name: "Legacy UPC-E",
+        manufacturer: null,
+        description: null,
+        packageSize: null,
+        isActive: true,
+        identifiers: [],
+      },
+      {
+        barcodeValue: "000123456789",
+        name: "Legacy unverified numeric",
+        manufacturer: null,
+        description: null,
+        packageSize: null,
+        isActive: true,
+        identifiers: [],
+      },
+      {
+        barcodeValue: "01234558",
+        name: "Typed EAN-8",
+        manufacturer: null,
+        description: null,
+        packageSize: null,
+        isActive: true,
+        identifiers: [{ type: "EAN", value: "01234558", source: "CONTINUIXAI_BARCODE_PRIMARY" }],
+      },
+    ]);
+    const app = await testApp();
+
+    const response = await app.inject({ method: "GET", url: "/api/products/export.csv?organizationId=org-a" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain("04210007,Legacy UPC-E,,,,,true,UPC_E");
+    expect(response.body).toContain("000123456789,Legacy unverified numeric,,,,,true,");
+    expect(response.body).toContain("01234558,Typed EAN-8,,,,,true,EAN_8");
+
+    mocks.productFindMany.mockResolvedValue([]);
+    const reimport = await preview(app, response.body);
+    expect(reimport.statusCode).toBe(200);
+    expect(reimport.json().totals.errors).toBe(0);
     await app.close();
   });
 
@@ -409,7 +645,15 @@ describe("product CSV tenant-safe onboarding", () => {
     expect(first.json().totals).toEqual({ rows: 2, valid: 0, warnings: 2, errors: 0 });
     const response = await app.inject({ method: "POST", url: "/api/products/import/commit", payload: { previewId: first.json().previewId, organizationId: "org-a" } });
     expect(response.statusCode).toBe(201);
-    expect(mocks.transactionProductFindMany).toHaveBeenCalledWith({ where: { organizationId: "org-a", barcodeValue: { in: ["001234", "001235"] } }, select: { barcodeValue: true } });
+    expect(mocks.transactionProductFindMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        organizationId: "org-a",
+        OR: expect.arrayContaining([
+          { barcodeValue: { in: ["001234", "001235"] } },
+          expect.objectContaining({ identifiers: expect.any(Object) }),
+        ]),
+      }),
+    }));
     expect(response.json()).toEqual({ imported: 2 });
     await app.close();
   });

@@ -80,6 +80,8 @@ describe("retail scanner engine", () => {
     expect(normalizeRetailBarcode("01234543", "upc_e")).toBe("012340000053");
     expect(normalizeRetailBarcode("01234558", "upc_e")).toBe("012345000058");
     expect(normalizeRetailBarcode("11234502", "upc_e")).toBe("112000003452");
+    expect(normalizeRetailBarcode("00000137", "upc_e")).toBeNull();
+    expect(normalizeRetailBarcode("00000107", "upc_e")).toBe("000000000017");
     expect(normalizeRetailBarcode("04210008", "upc_e")).toBeNull();
     expect(normalizeRetailBarcode("21234558", "upc_e")).toBeNull();
   });

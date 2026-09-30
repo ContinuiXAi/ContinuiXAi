@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Prisma } from "@prisma/client";
 import type { FastifyInstance } from "fastify";
+import { ambiguousRetailBarcodeAlternate, preferredRetailBarcode, retailBarcodeEquivalents, upcEAliasForRetailBarcode } from "@continuixai/shared";
 import { z } from "zod";
 import { prisma } from "../lib/prisma.js";
 import { isUniqueConstraintError } from "../lib/prismaErrors.js";
@@ -9,6 +10,7 @@ import { matchExistingCategory } from "../lib/barcodeLookup/categoryMatch.js";
 import { ensurePilotSiteForUser } from "../lib/pilotSite.js";
 import { assignedCountWhere, countWriteError, hasRequiredCountObservations, isCurrentCountAssignee, lockCountLocation, lockCountProduct, lockCountScope, requireCountWriter } from "../lib/storeCountWriteAccess.js";
 import { lockSiteAndMembership } from "../lib/accessLocking.js";
+import { BARCODE_ALIAS_SOURCE, lockProductBarcodeWrites, retailBarcodeDuplicateWhere, retailBarcodeProductWhere } from "../lib/productBarcodeIdentity.js";
 
 // Cycle-count MVP: when set, the session expects/routes only that ABC class
 // of product at the site instead of the full catalog. Omitted (undefined) ==
@@ -20,6 +22,7 @@ const createSessionSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
   siteId: z.string().trim().min(1).optional(),
   cycleCountClass: cycleCountClassSchema.optional(),
+  replaceEmptySessionId: z.string().trim().min(1).optional(),
 });
 
 const scanSchema = z.object({
@@ -342,12 +345,21 @@ async function assertSessionAccess(
   return { ok: true, session };
 }
 
-async function findOrEnrichProduct(barcodeValue: string, organizationId: string) {
-  const existing = await prisma.product.findFirst({ where: { organizationId, barcodeValue } });
-  if (existing) return existing;
-
-  const lookup = await resolveProduct(barcodeValue);
+async function findOrEnrichProduct(
+  barcodeValue: string,
+  organizationId: string,
+  sessionId: string,
+  userId: string,
+) {
+  const preferredBarcodeValue = preferredRetailBarcode(barcodeValue);
+  let lookup: Awaited<ReturnType<typeof resolveProduct>>;
+  try {
+    lookup = await resolveProduct(preferredBarcodeValue);
+  } catch {
+    return null;
+  }
   if (!lookup.found || !lookup.name?.trim()) return null;
+  const lookupName = lookup.name.trim();
 
   const categories = await prisma.category.findMany({
     where: { isActive: true },
@@ -355,24 +367,165 @@ async function findOrEnrichProduct(barcodeValue: string, organizationId: string)
   });
   const matchedCategory = matchExistingCategory(lookup.category, categories);
 
+  const upcEAlias = upcEAliasForRetailBarcode(preferredBarcodeValue);
+  const barcodeFormat = /^\d{12}$/.test(preferredBarcodeValue) ? "UPC_A" as const
+    : /^\d{13}$/.test(preferredBarcodeValue) ? "EAN_13" as const
+      : null;
   try {
-    return await prisma.product.create({
-      data: {
-        organizationId,
-        barcodeValue,
-        name: lookup.name.trim(),
-        manufacturer: lookup.brand?.trim() || null,
-        description: lookup.description?.trim() || null,
-        packageSize: lookup.size?.trim() || null,
-        imageUrl: lookup.imageUrl?.trim() || null,
-        categoryId: matchedCategory?.id ?? null,
-        isActive: true,
-      },
+    return await prisma.$transaction(async (tx) => {
+      // Auto-enrichment is a catalog write triggered by a count. Re-lock the
+      // count's complete authorization scope before that write so a concurrent
+      // revocation cannot leave behind a product created by a denied scan.
+      const scope = await requireCountWriter(tx, sessionId, userId);
+      if (scope.organizationId !== organizationId) throw new Error("COUNT_ACCESS_REVOKED");
+      await lockProductBarcodeWrites(tx, organizationId);
+      const existing = await tx.product.findMany({
+        where: retailBarcodeDuplicateWhere(organizationId, preferredBarcodeValue, barcodeFormat, upcEAlias),
+        include: { identifiers: { where: { value: upcEAlias ?? "", type: "UPC" }, select: { value: true, type: true } } },
+        take: 2,
+      });
+      if (existing.length > 1) throw new Error("BARCODE_CATALOG_CONFLICT");
+      if (existing[0]) return existing[0];
+      return tx.product.create({
+        data: {
+          organizationId,
+          barcodeValue: preferredBarcodeValue,
+          name: lookupName,
+          manufacturer: lookup.brand?.trim() || null,
+          description: lookup.description?.trim() || null,
+          packageSize: lookup.size?.trim() || null,
+          imageUrl: lookup.imageUrl?.trim() || null,
+          categoryId: matchedCategory?.id ?? null,
+          isActive: true,
+          ...(upcEAlias
+            ? {
+                identifiers: {
+                  create: {
+                    organizationId,
+                    type: "UPC" as const,
+                    value: upcEAlias,
+                    source: BARCODE_ALIAS_SOURCE,
+                  },
+                },
+              }
+            : {}),
+        },
+        include: { identifiers: { where: { value: upcEAlias ?? "", type: "UPC" }, select: { value: true, type: true } } },
+      });
     });
   } catch (error) {
     if (!isUniqueConstraintError(error)) throw error;
-    return prisma.product.findFirst({ where: { organizationId, barcodeValue } });
+    const existing = await prisma.product.findMany({
+      where: retailBarcodeDuplicateWhere(organizationId, preferredBarcodeValue, barcodeFormat, upcEAlias),
+      include: { identifiers: { where: { value: upcEAlias ?? "", type: "UPC" }, select: { value: true, type: true } } },
+      take: 2,
+    });
+    if (existing.length > 1) throw new Error("BARCODE_CATALOG_CONFLICT");
+    return existing[0] ?? null;
   }
+}
+
+type CountProductIdentity = {
+  id: string;
+  organizationId: string | null;
+  barcodeValue: string | null;
+  name: string;
+  packageSize?: string | null;
+  identifiers?: Array<{
+    value: string;
+    type: string;
+    source?: string | null;
+    packagingId?: string | null;
+  }>;
+};
+
+type ProductIdentityResolution =
+  | { status: "found"; product: CountProductIdentity }
+  | { status: "missing" }
+  | { status: "conflict" }
+  | { status: "ambiguous" };
+
+type ProductIdentityDelegate = {
+  findMany: (args: Prisma.ProductFindManyArgs) => Promise<unknown>;
+};
+
+const barcodeIdentifierSelection = (barcodeValue: string) => ({
+  where: {
+    OR: [
+      { value: { in: [barcodeValue, ...retailBarcodeEquivalents(barcodeValue)] } },
+      { type: "UPC" as const, source: BARCODE_ALIAS_SOURCE, packagingId: null },
+    ],
+  },
+  select: { value: true, type: true, source: true, packagingId: true },
+});
+
+async function resolveCountProductIdentity(
+  products: ProductIdentityDelegate,
+  organizationId: string,
+  barcodeValue: string,
+): Promise<ProductIdentityResolution> {
+  const exact = await products.findMany({
+    where: { organizationId, barcodeValue: barcodeValue.trim() },
+    include: { identifiers: barcodeIdentifierSelection(barcodeValue) },
+    take: 2,
+  }) as CountProductIdentity[];
+  if (exact.length > 1) return { status: "conflict" };
+  if (exact[0]) return { status: "found", product: exact[0] };
+
+  const matches = await products.findMany({
+    where: retailBarcodeProductWhere(organizationId, barcodeValue),
+    include: { identifiers: barcodeIdentifierSelection(barcodeValue) },
+    take: 2,
+  }) as CountProductIdentity[];
+  if (matches.length > 1) return { status: "conflict" };
+  if (matches[0]) return { status: "found", product: matches[0] };
+
+  const ambiguousAlternate = ambiguousRetailBarcodeAlternate(barcodeValue);
+  if (ambiguousAlternate) {
+    const alternateMatches = await products.findMany({
+      where: retailBarcodeProductWhere(organizationId, barcodeValue, { includeAmbiguousAlternate: true }),
+      include: { identifiers: barcodeIdentifierSelection(barcodeValue) },
+      take: 2,
+    }) as CountProductIdentity[];
+    if (alternateMatches.length > 0) return { status: "conflict" };
+    if (/^\d{8}$/.test(barcodeValue.trim())) return { status: "ambiguous" };
+  }
+  return { status: "missing" };
+}
+
+function countEntryBarcodeIdentity(product: CountProductIdentity | null, barcodeValue: string) {
+  const scannedBarcodeEquivalents = retailBarcodeEquivalents(barcodeValue);
+  const productBarcodeEquivalents = product?.barcodeValue
+    ? retailBarcodeEquivalents(product.barcodeValue)
+    : [];
+  const expectedManagedAlias = product?.barcodeValue
+    ? upcEAliasForRetailBarcode(product.barcodeValue)
+    : null;
+  const managedUpcAlias = product?.identifiers?.find((identifier) =>
+    identifier.type === "UPC"
+    && identifier.value === expectedManagedAlias
+    && identifier.source === BARCODE_ALIAS_SOURCE
+    && !identifier.packagingId
+  )?.value ?? null;
+  const matchedManagedUpcAlias = managedUpcAlias === barcodeValue;
+  const productBarcodeSharesRetailIdentity = matchedManagedUpcAlias || productBarcodeEquivalents.some((candidate) =>
+    scannedBarcodeEquivalents.includes(candidate),
+  );
+  const entryIdentityBarcode = matchedManagedUpcAlias && product?.barcodeValue
+    ? preferredRetailBarcode(product.barcodeValue)
+    : preferredRetailBarcode(barcodeValue);
+  return {
+    entryIdentityBarcode,
+    // A product may also have unrelated supplier/case identifiers. Only let a
+    // scan reuse the primary item's historical managed UPC-E row when the
+    // scanned value is itself another representation of that primary barcode.
+    managedUpcAlias: productBarcodeSharesRetailIdentity ? managedUpcAlias : null,
+    equivalentEntryBarcodes: [...new Set([
+      ...scannedBarcodeEquivalents,
+      ...(productBarcodeSharesRetailIdentity ? productBarcodeEquivalents : []),
+      entryIdentityBarcode,
+    ])],
+  };
 }
 
 async function findIdempotentEntry(clientScanId: string, sessionId: string) {
@@ -405,8 +558,84 @@ export async function storeCountRoutes(app: FastifyInstance) {
 
     const result = await prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`store-count:${userId}:${authorizedSite.id}`}))`;
-      const lockedSite = await lockSiteAndMembership(tx, userId, authorizedSite.id, "update");
-      if (!lockedSite) return { status: "forbidden" as const };
+      let lockedSite: { id: string; organizationId: string } | null = null;
+      let cycleClassConflictChecked = false;
+      let cancelledReplacementRetry = false;
+      let sessionName = parsed.data.name ?? null;
+      let cycleCountClass = parsed.data.cycleCountClass ?? null;
+
+      if (parsed.data.replaceEmptySessionId) {
+        // Count mutations establish the global relation order by locking the
+        // session before actor/organization/site authorization. Preserve that
+        // order here so setup cannot deadlock with a concurrent scan/cancel.
+        const replacement = await lockCountScope(tx, parsed.data.replaceEmptySessionId, userId);
+        if (!replacement || replacement.siteId !== authorizedSite.id) {
+          return { status: "replacement-not-found" as const };
+        }
+        if (!isCurrentCountAssignee(replacement, userId)) {
+          return { status: "replacement-forbidden" as const };
+        }
+        lockedSite = { id: replacement.siteId, organizationId: replacement.organizationId };
+        sessionName = parsed.data.name ?? replacement.name;
+        cycleCountClass = parsed.data.cycleCountClass ?? replacement.cycleCountClass;
+
+        if (replacement.status === "CANCELLED") {
+          // A lost HTTP response can leave the old session cancelled while its
+          // replacement is already active. Resume that replacement below, but
+          // never let an old cancelled link create yet another count.
+          cancelledReplacementRetry = true;
+        } else if (replacement.status !== "ACTIVE") {
+          return { status: "replacement-no-longer-active" as const };
+        }
+
+        if (replacement.status === "ACTIVE") {
+          if (cycleCountClass) {
+            // Check every normal conflict before cancelling the old session.
+            // Returning a status from an interactive transaction commits prior
+            // writes, so doing this afterward could cancel the old count while
+            // still responding that no replacement was created.
+            await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`cycle-count-class:${lockedSite.id}:${cycleCountClass}`}))`;
+            const conflicting = await tx.storeCountSession.findFirst({
+              where: {
+                id: { not: replacement.id },
+                status: "ACTIVE",
+                siteId: lockedSite.id,
+                cycleCountClass,
+              },
+              select: { id: true },
+            });
+            if (conflicting) return { status: "class-locked" as const };
+            cycleClassConflictChecked = true;
+          }
+
+          // Keep transaction-client operations sequential. Prisma interactive
+          // transactions use one database connection, so parallel promises add
+          // no throughput and make the authorization/cancellation sequence less
+          // explicit when this path is exercised under contention.
+          const entryCount = await tx.storeCountEntry.count({
+            // Any persisted evidence makes the session nonempty. Do not hide a
+            // corrupt/legacy cross-site row behind a relation filter and then
+            // cancel the session that owns it.
+            where: { sessionId: replacement.id },
+          });
+          const approvalCount = await tx.storeCountDiscrepancy.count({
+            where: { sessionId: replacement.id },
+          });
+          const progressedLocationCount = await tx.storeCountLocationVisit.count({
+            where: { sessionId: replacement.id, status: { not: "PENDING" } },
+          });
+          if (entryCount > 0 || approvalCount > 0 || progressedLocationCount > 0) {
+            return { status: "replacement-has-activity" as const };
+          }
+          await tx.storeCountSession.update({
+            where: { id: replacement.id, siteId: replacement.siteId, status: "ACTIVE" },
+            data: { status: "CANCELLED", completedAt: new Date() },
+          });
+        }
+      } else {
+        lockedSite = await lockSiteAndMembership(tx, userId, authorizedSite.id, "update");
+        if (!lockedSite) return { status: "forbidden" as const };
+      }
 
       // One physical person can only be doing one count at a time: if this user
       // already has ANY active session at this site — full or class-scoped —
@@ -417,24 +646,28 @@ export async function storeCountRoutes(app: FastifyInstance) {
         orderBy: { startedAt: "desc" },
       });
       if (existing) return { status: "ok" as const, created: false, session: existing };
+      if (cancelledReplacementRetry) {
+        return { status: "replacement-no-longer-active" as const };
+      }
 
-      const cycleCountClass = parsed.data.cycleCountClass ?? null;
       if (cycleCountClass) {
         // Cycle-count freeze: at most one ACTIVE session per site per class,
         // across every user — stops two employees from double-counting the
         // same scheduled partial count. Scoped lock (not the per-user one
         // above) so concurrent requests from different users serialize here.
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`cycle-count-class:${lockedSite.id}:${cycleCountClass}`}))`;
-        const conflicting = await tx.storeCountSession.findFirst({
-          where: { status: "ACTIVE", siteId: lockedSite.id, cycleCountClass },
-          select: { id: true },
-        });
-        if (conflicting) return { status: "class-locked" as const };
+        if (!cycleClassConflictChecked) {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`cycle-count-class:${lockedSite.id}:${cycleCountClass}`}))`;
+          const conflicting = await tx.storeCountSession.findFirst({
+            where: { status: "ACTIVE", siteId: lockedSite.id, cycleCountClass },
+            select: { id: true },
+          });
+          if (conflicting) return { status: "class-locked" as const };
+        }
       }
 
       const session = await tx.storeCountSession.create({
         data: {
-          name: parsed.data.name ?? null,
+          name: sessionName,
           startedById: userId,
           assignedToId: userId,
           siteId: lockedSite.id,
@@ -503,6 +736,18 @@ export async function storeCountRoutes(app: FastifyInstance) {
 
     if (result.status === "forbidden") {
       return reply.code(403).send({ error: "you do not have access to that site" });
+    }
+    if (result.status === "replacement-not-found") {
+      return reply.code(404).send({ error: "the count being replaced was not found for this site" });
+    }
+    if (result.status === "replacement-forbidden") {
+      return reply.code(403).send({ error: "only the current assignee can replace this count" });
+    }
+    if (result.status === "replacement-has-activity") {
+      return reply.code(409).send({ error: "This count already has count activity and cannot be replaced. Return to the count and review it." });
+    }
+    if (result.status === "replacement-no-longer-active") {
+      return reply.code(409).send({ error: "This setup count is no longer active. Return to Count and start setup again." });
     }
     if (result.status === "class-locked") {
       return reply.code(409).send({ error: "a cycle count for this class is already in progress at this site" });
@@ -631,20 +876,24 @@ export async function storeCountRoutes(app: FastifyInstance) {
       return reply.code(403).send({ error: "location does not belong to this count site" });
     }
 
-    let product = await prisma.product.findFirst({
-      where: { organizationId: countSite.organizationId, barcodeValue },
-    });
-    if (!product) {
-      const identifier = await prisma.productIdentifier.findFirst({
-        where: { organizationId: countSite.organizationId, value: barcodeValue, product: { organizationId: countSite.organizationId } }, include: { product: true },
-      });
-      product = identifier?.product ?? null;
+    const initialResolution = await resolveCountProductIdentity(prisma.product, countSite.organizationId, barcodeValue);
+    if (initialResolution.status === "conflict") {
+      return reply.code(409).send({ error: "barcode matches more than one product; review the catalog" });
     }
-    if (!product) {
+    if (initialResolution.status === "ambiguous") {
+      return reply.code(422).send({ error: "This 8-digit code can be UPC-E or EAN-8. Configure the scanner to send UPC-A, use the camera, or select the product manually." });
+    }
+    let preflightProduct = initialResolution.status === "found" ? initialResolution.product : null;
+    if (!preflightProduct) {
       try {
-        product = await findOrEnrichProduct(barcodeValue, countSite.organizationId);
-      } catch {
-        product = null;
+        preflightProduct = await findOrEnrichProduct(barcodeValue, countSite.organizationId, id, userId);
+      } catch (error) {
+        if (error instanceof Error && error.message === "BARCODE_CATALOG_CONFLICT") {
+          return reply.code(409).send({ error: "barcode matches more than one product; review the catalog" });
+        }
+        const accessError = countWriteError(error);
+        if (accessError) return reply.code(accessError.code).send({ error: accessError.error });
+        preflightProduct = null;
       }
     }
 
@@ -666,13 +915,58 @@ export async function storeCountRoutes(app: FastifyInstance) {
         }
 
         if (scope.organizationId !== countSite.organizationId || scope.siteId !== access.session.siteId) throw new Error("COUNT_ACCESS_REVOKED");
+        // requireCountWriter holds the organization SHARE lock, so catalog
+        // writers (which take UPDATE) cannot change this result until the scan
+        // commits. Never trust the preflight lookup across this boundary.
+        const lockedResolution = await resolveCountProductIdentity(tx.product, scope.organizationId, barcodeValue);
+        if (lockedResolution.status === "conflict") throw new Error("COUNT_BARCODE_IDENTITY_CONFLICT");
+        if (lockedResolution.status === "ambiguous") throw new Error("COUNT_BARCODE_AMBIGUOUS");
+        const product = lockedResolution.status === "found" ? lockedResolution.product : null;
+        if (preflightProduct && (!product || product.id !== preflightProduct.id)) throw new Error("COUNT_PRODUCT_INVALID");
+        const { entryIdentityBarcode, equivalentEntryBarcodes, managedUpcAlias } = countEntryBarcodeIdentity(product, barcodeValue);
         if (product) await lockCountProduct(tx, scope, product.id);
-        const previousEntry = await tx.storeCountEntry.findUnique({
+        let previousEntry = await tx.storeCountEntry.findUnique({
           where: {
-            sessionId_locationId_barcodeValue: { sessionId: id, locationId, barcodeValue },
+            sessionId_locationId_barcodeValue: { sessionId: id, locationId, barcodeValue: entryIdentityBarcode },
           },
           include: { countedBy: { select: { id: true, name: true } } },
         });
+        const alternateEntryBarcodes = equivalentEntryBarcodes.filter((candidate) => candidate !== entryIdentityBarcode);
+        const alternateEntries = alternateEntryBarcodes.length > 0
+          ? await tx.storeCountEntry.findMany({
+            where: {
+              sessionId: id,
+              locationId,
+              barcodeValue: { in: alternateEntryBarcodes },
+            },
+            include: { countedBy: { select: { id: true, name: true } } },
+            take: 2,
+          })
+          : [];
+        // A pre-canonicalization release may have stored this UPC product under
+        // its managed UPC-E alias. Reuse only a row linked to the same product;
+        // the identical eight digits may independently be a real EAN-8 product.
+        const managedAliasEntry = product && managedUpcAlias
+          && managedUpcAlias !== entryIdentityBarcode
+          && !alternateEntryBarcodes.includes(managedUpcAlias)
+          ? await tx.storeCountEntry.findFirst({
+            where: {
+              sessionId: id,
+              locationId,
+              productId: product.id,
+              barcodeValue: managedUpcAlias,
+            },
+            include: { countedBy: { select: { id: true, name: true } } },
+          })
+          : null;
+        const candidateEntries = [previousEntry, ...alternateEntries, managedAliasEntry]
+          .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
+        const distinctEntryIds = new Set(candidateEntries.map((entry) => entry.id));
+        if (distinctEntryIds.size > 1) {
+          throw new Error("COUNT_BARCODE_IDENTITY_CONFLICT");
+        }
+        previousEntry ??= alternateEntries[0] ?? managedAliasEntry ?? null;
+        const storedBarcodeValue = previousEntry?.barcodeValue ?? entryIdentityBarcode;
         if (previousEntry?.productId && previousEntry.productId !== product?.id) await lockCountProduct(tx, scope, previousEntry.productId);
         await rejectApprovedProductWrite(tx, id, previousEntry?.productId ?? null);
         await rejectApprovedProductWrite(tx, id, product?.id ?? null);
@@ -684,7 +978,7 @@ export async function storeCountRoutes(app: FastifyInstance) {
           INSERT INTO "StoreCountEntry"
             ("id", "sessionId", "productId", "barcodeValue", "locationId", "quantity", "countedByUserId", "scannedAt", "updatedAt", "expiresAt")
           VALUES
-            (${randomUUID()}, ${id}, ${product?.id ?? null}, ${barcodeValue}, ${locationId}, ${quantityDelta}, ${userId}, ${now}, ${now}, ${expiresAt ?? null})
+            (${randomUUID()}, ${id}, ${product?.id ?? null}, ${storedBarcodeValue}, ${locationId}, ${quantityDelta}, ${userId}, ${now}, ${now}, ${expiresAt ?? null})
           ON CONFLICT ("sessionId", "locationId", "barcodeValue")
           DO UPDATE SET
             "quantity" = "StoreCountEntry"."quantity" + EXCLUDED."quantity",
@@ -727,6 +1021,15 @@ export async function storeCountRoutes(app: FastifyInstance) {
       }
       if (error instanceof Error && error.message === "IDEMPOTENCY_SESSION_CONFLICT") {
         return reply.code(409).send({ error: "clientScanId was already used for another count session" });
+      }
+      if (error instanceof Error && error.message === "COUNT_BARCODE_IDENTITY_CONFLICT") {
+        return reply.code(409).send({ error: "This item already has more than one count row for equivalent barcodes. Ask a manager to reconcile the catalog before continuing." });
+      }
+      if (error instanceof Error && error.message === "COUNT_BARCODE_AMBIGUOUS") {
+        return reply.code(422).send({ error: "This 8-digit code can be UPC-E or EAN-8. Configure the scanner to send UPC-A, use the camera, or select the product manually." });
+      }
+      if (error instanceof Error && error.message === "COUNT_PRODUCT_INVALID") {
+        return reply.code(409).send({ error: "The product catalog changed while this item was being counted. Scan it again." });
       }
       if (clientScanId && isUniqueConstraintError(error)) {
         const prior = await findIdempotentEntry(clientScanId, id);

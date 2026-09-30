@@ -1,5 +1,7 @@
 import Fastify from "fastify";
 import jwt from "@fastify/jwt";
+import { setTimeout as sleep } from "node:timers/promises";
+import pg from "pg";
 import { prisma } from "../src/lib/prisma.js";
 import { productRoutes } from "../src/routes/products.js";
 import { storeCountRoutes } from "../src/routes/storeCount.js";
@@ -26,6 +28,13 @@ async function main() {
   const barcodeConflict = `route-conflict-${suffix}`;
   const barcodeZero = `route-zero-${suffix}`;
   const barcodeCatalog = `route-catalog-${suffix}`;
+  const barcodeCatalogChanged = `route-catalog-changed-${suffix}`;
+  const compressedCosmeticUpc = "04210007";
+  const expandedCosmeticUpc = "042000001007";
+  const dualValidUpcE = "01234558";
+  const dualValidUpcA = "012345000058";
+  const concurrentDualCode = "00000116";
+  const concurrentDualUpcA = "000100000016";
   const catalogName = `Catalog Product ${suffix}`;
 
   const app = Fastify({ logger: false });
@@ -37,6 +46,25 @@ async function main() {
   await app.register(storeCountRoutes, { prefix: "/api/store-count" });
   await app.register(inventoryTruthRoutes, { prefix: "/api/inventory-truth" });
   await app.ready();
+
+  const connectionString = process.env.DATABASE_URL ?? "";
+  const holder = new pg.Client({ connectionString, application_name: "store-count-catalog-holder" });
+  const observer = new pg.Client({ connectionString, application_name: "store-count-catalog-observer" });
+  await holder.connect();
+  await observer.connect();
+  const holderPid = Number((await holder.query("SELECT pg_backend_pid() AS pid")).rows[0].pid);
+
+  async function waitForBlockedSessionLock() {
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      const result = await observer.query<{ count: number }>(`SELECT COUNT(*)::int AS count FROM pg_stat_activity
+        WHERE pid <> $1 AND state = 'active' AND query LIKE '%StoreCountSession%'
+          AND $1 = ANY(pg_blocking_pids(pid))`, [holderPid]);
+      if (result.rows[0].count > 0) return;
+      await sleep(10);
+    }
+    throw new Error("Did not observe the HTTP scan blocked on StoreCountSession; catalog-race schedule is not proven");
+  }
 
   let adminId: string | null = null;
   let userId: string | null = null;
@@ -72,6 +100,7 @@ async function main() {
       { organizationId, barcodeValue: barcodeRetry, name: "Retry route product", isActive: true },
       { organizationId, barcodeValue: barcodeConflict, name: "Conflict route product", isActive: true },
       { organizationId, barcodeValue: barcodeZero, name: "Confirmed-zero route product", isActive: true },
+      { organizationId, barcodeValue: compressedCosmeticUpc, name: "Compressed cosmetic route product", isActive: true },
     ] });
 
     const adminToken = app.jwt.sign({ sub: admin.id, role: "ADMIN", tv: 0 });
@@ -100,9 +129,30 @@ async function main() {
     for (const response of startResponses) assert(response.statusCode === 200 || response.statusCode === 201, `session creation returned ${response.statusCode}: ${response.body}`);
     const sessionIds = new Set(startResponses.map((response) => parseJson<{ id: string }>(response.body).id));
     assert(sessionIds.size === 1, `concurrent session creation produced ${sessionIds.size} ACTIVE sessions`);
-    const sessionId = [...sessionIds][0]!;
+    let sessionId = [...sessionIds][0]!;
     const activeSessionCount = await prisma.storeCountSession.count({ where: { startedById: admin.id, status: "ACTIVE", siteId: site.id } });
     assert(activeSessionCount === 1, `database contains ${activeSessionCount} ACTIVE sessions for one user/site`);
+
+    const replacementResponse = await app.inject({
+      method: "POST",
+      url: "/api/store-count/sessions",
+      headers: auth(adminToken),
+      payload: { siteId: site.id, replaceEmptySessionId: sessionId },
+    });
+    assert(replacementResponse.statusCode === 201, `empty-session replacement returned ${replacementResponse.statusCode}: ${replacementResponse.body}`);
+    const replacedSessionId = sessionId;
+    sessionId = parseJson<{ id: string }>(replacementResponse.body).id;
+    assert(sessionId !== replacedSessionId, "empty-session replacement returned the original session");
+    const replacedSession = await prisma.storeCountSession.findUniqueOrThrow({ where: { id: replacedSessionId } });
+    assert(replacedSession.status === "CANCELLED", "empty-session replacement did not cancel the original session atomically");
+    const replacementRetry = await app.inject({
+      method: "POST",
+      url: "/api/store-count/sessions",
+      headers: auth(adminToken),
+      payload: { siteId: site.id, replaceEmptySessionId: replacedSessionId },
+    });
+    assert(replacementRetry.statusCode === 200, `empty-session replacement retry returned ${replacementRetry.statusCode}: ${replacementRetry.body}`);
+    assert(parseJson<{ id: string }>(replacementRetry.body).id === sessionId, "replacement retry created or returned a different active session");
 
     const createCatalogProduct = await app.inject({ method: "POST", url: "/api/products", headers: auth(adminToken), payload: { barcodeValue: barcodeCatalog, name: catalogName, manufacturer: "Route Validation Co", packageSize: "12 ct", isActive: true } });
     assert(createCatalogProduct.statusCode === 201, `Product API create returned ${createCatalogProduct.statusCode}: ${createCatalogProduct.body}`);
@@ -114,6 +164,124 @@ async function main() {
     assert(catalogScan.statusCode === 200, `newly cataloged Product scan returned ${catalogScan.statusCode}: ${catalogScan.body}`);
     const catalogEntry = parseJson<{ productId: string | null; quantity: number; product: { name: string } | null }>(catalogScan.body);
     assert(catalogEntry.productId === createdCatalogProduct.id && catalogEntry.product?.name === catalogName && catalogEntry.quantity === 1, "Store Count did not resolve the Product API catalog record correctly");
+    const nonEmptyReplacement = await app.inject({
+      method: "POST",
+      url: "/api/store-count/sessions",
+      headers: auth(adminToken),
+      payload: { siteId: site.id, replaceEmptySessionId: sessionId },
+    });
+    assert(nonEmptyReplacement.statusCode === 409, `session with count evidence was replaced: ${nonEmptyReplacement.statusCode} ${nonEmptyReplacement.body}`);
+    const stillActiveSession = await prisma.storeCountSession.findUniqueOrThrow({ where: { id: sessionId } });
+    assert(stillActiveSession.status === "ACTIVE", "rejected non-empty replacement changed the active session");
+
+    const cosmeticProduct = await prisma.product.findUniqueOrThrow({
+      where: { organizationId_barcodeValue: { organizationId, barcodeValue: compressedCosmeticUpc } },
+    });
+    const expandedLookup = await app.inject({
+      method: "GET",
+      url: `/api/products/by-barcode/${expandedCosmeticUpc}`,
+      headers: auth(adminToken),
+    });
+    assert(expandedLookup.statusCode === 200, `expanded UPC-A lookup returned ${expandedLookup.statusCode}: ${expandedLookup.body}`);
+    assert(parseJson<{ id: string }>(expandedLookup.body).id === cosmeticProduct.id, "expanded camera UPC did not resolve the legacy compressed product");
+    const [cameraCosmeticScan, handheldCosmeticScan] = await Promise.all([
+      app.inject({
+        method: "POST",
+        url: `/api/store-count/sessions/${sessionId}/scan`,
+        headers: auth(adminToken),
+        payload: { barcodeValue: expandedCosmeticUpc, locationId: location.id, quantityDelta: 1, clientScanId: `route-camera-cosmetic-${suffix}` },
+      }),
+      app.inject({
+        method: "POST",
+        url: `/api/store-count/sessions/${sessionId}/scan`,
+        headers: auth(adminToken),
+        payload: { barcodeValue: compressedCosmeticUpc, locationId: location.id, quantityDelta: 1, clientScanId: `route-handheld-cosmetic-${suffix}` },
+      }),
+    ]);
+    assert(cameraCosmeticScan.statusCode === 200, `camera cosmetic scan returned ${cameraCosmeticScan.statusCode}: ${cameraCosmeticScan.body}`);
+    assert(handheldCosmeticScan.statusCode === 200, `handheld cosmetic scan returned ${handheldCosmeticScan.statusCode}: ${handheldCosmeticScan.body}`);
+    const cosmeticEntry = await prisma.storeCountEntry.findFirstOrThrow({
+      where: { sessionId, locationId: location.id, productId: cosmeticProduct.id },
+    });
+    assert(cosmeticEntry.productId === cosmeticProduct.id && cosmeticEntry.quantity === 2, "camera and handheld UPC forms did not accumulate on one product entry");
+    const cosmeticEntryCount = await prisma.storeCountEntry.count({
+      where: { sessionId, locationId: location.id, barcodeValue: { in: [compressedCosmeticUpc, expandedCosmeticUpc] } },
+    });
+    const cosmeticProductCount = await prisma.product.count({
+      where: { organizationId, barcodeValue: { in: [compressedCosmeticUpc, expandedCosmeticUpc] } },
+    });
+    assert(cosmeticEntryCount === 1, `camera and handheld UPC forms produced ${cosmeticEntryCount} count entries, expected 1`);
+    assert(cosmeticProductCount === 1, `camera and handheld UPC forms produced ${cosmeticProductCount} products, expected 1`);
+
+    const dualProductResponse = await app.inject({
+      method: "POST",
+      url: "/api/products",
+      headers: auth(adminToken),
+      payload: { barcodeValue: dualValidUpcE, barcodeFormat: "UPC_E", name: "Dual-valid UPC-E cosmetic", isActive: true },
+    });
+    assert(dualProductResponse.statusCode === 201, `explicit dual-valid UPC-E create returned ${dualProductResponse.statusCode}: ${dualProductResponse.body}`);
+    const dualProduct = parseJson<{ id: string }>(dualProductResponse.body);
+    const [dualCameraScan, dualHandheldScan] = await Promise.all([
+      app.inject({ method: "POST", url: `/api/store-count/sessions/${sessionId}/scan`, headers: auth(adminToken), payload: { barcodeValue: dualValidUpcA, locationId: location.id, quantityDelta: 1, clientScanId: `route-dual-camera-${suffix}` } }),
+      app.inject({ method: "POST", url: `/api/store-count/sessions/${sessionId}/scan`, headers: auth(adminToken), payload: { barcodeValue: dualValidUpcE, locationId: location.id, quantityDelta: 1, clientScanId: `route-dual-handheld-${suffix}` } }),
+    ]);
+    assert(dualCameraScan.statusCode === 200, `dual-valid camera scan returned ${dualCameraScan.statusCode}: ${dualCameraScan.body}`);
+    assert(dualHandheldScan.statusCode === 200, `dual-valid handheld scan returned ${dualHandheldScan.statusCode}: ${dualHandheldScan.body}`);
+    const dualEntry = await prisma.storeCountEntry.findUniqueOrThrow({
+      where: { sessionId_locationId_barcodeValue: { sessionId, locationId: location.id, barcodeValue: dualValidUpcA } },
+    });
+    assert(dualEntry.productId === dualProduct.id && dualEntry.quantity === 2, "typed UPC-E alias did not unify concurrent camera and handheld scans");
+    assert(await prisma.storeCountEntry.count({ where: { sessionId, locationId: location.id, productId: dualProduct.id } }) === 1, "typed UPC-E alias produced more than one count entry");
+
+    const concurrentIdentityCreates = await Promise.all([
+      app.inject({ method: "POST", url: "/api/products", headers: auth(adminToken), payload: { barcodeValue: concurrentDualCode, barcodeFormat: "UPC_E", name: "Concurrent UPC-E identity", isActive: true } }),
+      app.inject({ method: "POST", url: "/api/products", headers: auth(adminToken), payload: { barcodeValue: concurrentDualCode, barcodeFormat: "EAN_8", name: "Concurrent EAN-8 identity", isActive: true } }),
+    ]);
+    assert(concurrentIdentityCreates.every((response) => response.statusCode === 201), `typed concurrent identity creates failed: ${concurrentIdentityCreates.map((response) => `${response.statusCode} ${response.body}`).join(" | ")}`);
+    const concurrentUpcProduct = parseJson<{ id: string }>(concurrentIdentityCreates[0].body);
+    const concurrentEanProduct = parseJson<{ id: string }>(concurrentIdentityCreates[1].body);
+    assert(await prisma.product.count({ where: { organizationId, barcodeValue: { in: [concurrentDualCode, concurrentDualUpcA] } } }) === 2, "distinct concurrent EAN-8 and UPC-E identities were collapsed");
+    assert(await prisma.productIdentifier.count({ where: { organizationId, type: "UPC", value: concurrentDualCode } }) === 1, "typed UPC-E alias was not persisted exactly once");
+    const ambiguousRawLookup = await app.inject({ method: "GET", url: `/api/products/by-barcode/${concurrentDualCode}`, headers: auth(adminToken) });
+    assert(ambiguousRawLookup.statusCode === 200, `exact EAN-8 lookup returned ${ambiguousRawLookup.statusCode}: ${ambiguousRawLookup.body}`);
+    assert(parseJson<{ id: string }>(ambiguousRawLookup.body).id === concurrentEanProduct.id, "exact EAN-8 did not win over the distinct UPC-E alias");
+    const typedCameraLookup = await app.inject({ method: "GET", url: `/api/products/by-barcode/${concurrentDualUpcA}`, headers: auth(adminToken) });
+    assert(typedCameraLookup.statusCode === 200, `unambiguous UPC-A lookup returned ${typedCameraLookup.statusCode}: ${typedCameraLookup.body}`);
+    assert(parseJson<{ id: string }>(typedCameraLookup.body).id === concurrentUpcProduct.id, "expanded UPC-A did not resolve its typed UPC-E product");
+
+    // Deterministic stale-catalog proof. The scan completes its unlocked
+    // product preflight and then blocks on the session row. While it is
+    // blocked, the catalog writer changes that product's barcode and commits.
+    // Once released, the scan must re-resolve under the organization lock and
+    // reject without a count entry or idempotency log.
+    const raceProduct = await prisma.product.create({
+      data: { organizationId, barcodeValue: barcodeCatalogChanged, name: "Catalog race product", isActive: true },
+    });
+    const raceClientScanId = `route-catalog-race-${suffix}`;
+    await holder.query("BEGIN");
+    await holder.query('SELECT "id" FROM "StoreCountSession" WHERE "id" = $1 FOR UPDATE', [sessionId]);
+    const blockedScan = app.inject({
+      method: "POST",
+      url: `/api/store-count/sessions/${sessionId}/scan`,
+      headers: auth(adminToken),
+      payload: { barcodeValue: barcodeCatalogChanged, locationId: location.id, quantityDelta: 1, clientScanId: raceClientScanId },
+    });
+    try {
+      await waitForBlockedSessionLock();
+      const catalogPatch = await app.inject({
+        method: "PATCH",
+        url: `/api/products/${raceProduct.id}?organizationId=${organization.id}`,
+        headers: auth(adminToken),
+        payload: { barcodeValue: `${barcodeCatalogChanged}-updated` },
+      });
+      assert(catalogPatch.statusCode === 200, `concurrent catalog PATCH returned ${catalogPatch.statusCode}: ${catalogPatch.body}`);
+    } finally {
+      await holder.query("COMMIT");
+    }
+    const staleCatalogScan = await blockedScan;
+    assert(staleCatalogScan.statusCode === 409, `stale-catalog scan returned ${staleCatalogScan.statusCode}, expected 409: ${staleCatalogScan.body}`);
+    assert(await prisma.storeCountEntry.count({ where: { sessionId, locationId: location.id, productId: raceProduct.id } }) === 0, "stale-catalog scan wrote a count entry");
+    assert(await prisma.storeCountScanLog.count({ where: { idempotencyKey: raceClientScanId } }) === 0, "stale-catalog scan wrote an idempotency log");
 
     const atomicResponses = await Promise.all(Array.from({ length: 20 }, (_, index) => app.inject({ method: "POST", url: `/api/store-count/sessions/${sessionId}/scan`, headers: auth(adminToken), payload: { barcodeValue: barcodeAtomic, locationId: location.id, quantityDelta: 1, clientScanId: `route-atomic-${suffix}-${index}` } })));
     for (const response of atomicResponses) assert(response.statusCode === 200, `unique scan returned ${response.statusCode}: ${response.body}`);
@@ -180,7 +348,10 @@ async function main() {
     console.log("Store Count HTTP route validation passed:");
     console.log("- newly registered unassigned pilot user is provisioned onto the single active organization/site");
     console.log("- concurrent session starts collapse to one ACTIVE session per user/site");
+    console.log("- empty-session setup replacement is atomic and retry-safe; non-empty sessions are preserved");
     console.log("- Product API and Store Count resolve the same catalog record");
+    console.log("- camera UPC-A and handheld UPC-E forms resolve one product and one accumulating count entry");
+    console.log("- a catalog PATCH between scan preflight and locked authorization is detected; no stale count or retry log is written");
     console.log("- 20 concurrent unique HTTP scans => quantity 20");
     console.log("- 10 concurrent HTTP retries with one clientScanId => quantity 1");
     console.log("- confirmed zero remains persisted and visible in the location summary");
@@ -189,6 +360,7 @@ async function main() {
     console.log("- clientScanId reuse across sessions => HTTP 409");
     console.log("- completed sessions reject new scans with HTTP 409 and preserve prior quantity");
   } finally {
+    await holder.query("ROLLBACK").catch(() => undefined);
     if (organizationId) {
       const siteIds = (await prisma.site.findMany({ where: { organizationId }, select: { id: true } })).map((site) => site.id);
       await prisma.storeCountAssignmentEvent.deleteMany({ where: { session: { siteId: { in: siteIds } } } });
@@ -204,6 +376,8 @@ async function main() {
     }
     const cleanupIds = [adminId, userId, unassignedUserId].filter((id): id is string => Boolean(id));
     if (cleanupIds.length) await prisma.user.deleteMany({ where: { id: { in: cleanupIds } } });
+    await holder.end();
+    await observer.end();
     await app.close();
     await prisma.$disconnect();
   }

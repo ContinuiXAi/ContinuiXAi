@@ -62,10 +62,9 @@ function StoreCountSetup() {
         method: "POST",
         body: JSON.stringify({ siteId, locationId, evidence: "ASSIGNED", isRequired: true }),
       });
-      await apiJson(`/api/store-count/sessions/${encodeURIComponent(sessionId)}/cancel`, { method: "POST" });
       const session = await apiJson<CreatedSession>("/api/store-count/sessions", {
         method: "POST",
-        body: JSON.stringify({ siteId }),
+        body: JSON.stringify({ siteId, replaceEmptySessionId: sessionId }),
       });
       show("Count location assigned. Your fresh count is ready.", "success");
       router.push(`/store-count?sessionId=${encodeURIComponent(session.id)}`);

@@ -5,6 +5,8 @@ export type CountScope = {
   id: string;
   siteId: string;
   organizationId: string;
+  name: string | null;
+  cycleCountClass: "A" | "B" | "C" | null;
   status: string;
   startedAt: Date;
   startedById: string | null;
@@ -25,7 +27,8 @@ export function assignedCountWhere(userId: string) {
 // SHARE locks keep authority stable until commit without serializing all counts.
 export async function lockCountScope(tx: Prisma.TransactionClient, sessionId: string, userId: string) {
   const rows = await tx.$queryRaw<Array<Omit<CountScope, "organizationRole">>>`
-    SELECT session."id", session."siteId", site."organizationId", session."status", session."startedAt",
+    SELECT session."id", session."siteId", site."organizationId", session."name", session."cycleCountClass",
+      session."status", session."startedAt",
       session."startedById", session."assignedToId"
     FROM "StoreCountSession" AS session
     INNER JOIN "Site" AS site ON site."id" = session."siteId"

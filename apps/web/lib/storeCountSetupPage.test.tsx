@@ -41,7 +41,6 @@ describe("Store Count setup page", () => {
       if (url === "/api/store-locations") return [{ id: "shelf", code: "A1", name: "Front shelf", isActive: true }];
       if (url === "/api/products") return [{ id: "product-a", name: "Vitamin B12", barcodeValue: "012345678905", packageSize: "60 tablets" }];
       if (url === "/api/inventory-truth/products/product-a/location-hints" && init?.method === "POST") return { id: "hint-a" };
-      if (url === "/api/store-count/sessions/empty-session/cancel" && init?.method === "POST") return { ok: true };
       if (url === "/api/store-count/sessions" && init?.method === "POST") return { id: "new-session" };
       throw new Error(`Unexpected request: ${url}`);
     });
@@ -67,11 +66,11 @@ describe("Store Count setup page", () => {
         body: JSON.stringify({ siteId: "site-a", locationId: "shelf", evidence: "ASSIGNED", isRequired: true }),
       },
     );
-    expect(mocks.apiJson).toHaveBeenCalledWith("/api/store-count/sessions/empty-session/cancel", { method: "POST" });
     expect(mocks.apiJson).toHaveBeenCalledWith("/api/store-count/sessions", {
       method: "POST",
-      body: JSON.stringify({ siteId: "site-a" }),
+      body: JSON.stringify({ siteId: "site-a", replaceEmptySessionId: "empty-session" }),
     });
+    expect(mocks.apiJson).not.toHaveBeenCalledWith("/api/store-count/sessions/empty-session/cancel", expect.anything());
     expect(mocks.push).toHaveBeenCalledWith("/store-count?sessionId=new-session");
   });
 

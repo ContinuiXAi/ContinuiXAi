@@ -27,6 +27,28 @@ export function getScannerFocusRegion(width: number, height: number) {
   };
 }
 
+function applyPortableContrast(context: CanvasRenderingContext2D, width: number, height: number) {
+  try {
+    const image = context.getImageData(0, 0, width, height);
+    const pixels = image.data;
+    for (let index = 0; index < pixels.length; index += 4) {
+      const grayscale = Math.round(
+        pixels[index] * 0.299
+        + pixels[index + 1] * 0.587
+        + pixels[index + 2] * 0.114,
+      );
+      const contrasted = Math.max(0, Math.min(255, Math.round((grayscale - 128) * 1.45 + 128)));
+      pixels[index] = contrasted;
+      pixels[index + 1] = contrasted;
+      pixels[index + 2] = contrasted;
+    }
+    context.putImageData(image, 0, 0);
+  } catch {
+    // A normal unfiltered frame was already drawn. Keep scanning if a browser
+    // or constrained WebView refuses pixel reads rather than disabling camera use.
+  }
+}
+
 async function installFocusedScannerCapture() {
   const { BrowserCodeReader } = await import("@zxing/browser");
   let captureAttempt = 0;
@@ -42,8 +64,6 @@ async function installFocusedScannerCapture() {
     if (canvas.width !== outputWidth) canvas.width = outputWidth;
     if (canvas.height !== outputHeight) canvas.height = outputHeight;
 
-    const priorFilter = context.filter;
-    if (region.contrast) context.filter = "grayscale(1) contrast(1.45)";
     context.drawImage(
       source,
       region.sx,
@@ -55,7 +75,7 @@ async function installFocusedScannerCapture() {
       outputWidth,
       outputHeight,
     );
-    context.filter = priorFilter;
+    if (region.contrast) applyPortableContrast(context, outputWidth, outputHeight);
   };
 }
 

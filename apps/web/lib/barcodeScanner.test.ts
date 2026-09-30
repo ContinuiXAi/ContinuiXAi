@@ -59,10 +59,13 @@ describe("barcodeScanner format constants vs @zxing/library", () => {
       videoHeight: { value: 720 },
     });
     const filters: string[] = [];
+    const contrastPixels = new Uint8ClampedArray([40, 80, 120, 255]);
     const context = {
       canvas: document.createElement("canvas"),
       filter: "none",
       drawImage: vi.fn(function (this: { filter: string }) { filters.push(this.filter); }),
+      getImageData: vi.fn(() => ({ data: contrastPixels })),
+      putImageData: vi.fn(),
     } as unknown as CanvasRenderingContext2D;
 
     BrowserCodeReader.drawImageOnCanvas(context, video);
@@ -74,7 +77,10 @@ describe("barcodeScanner format constants vs @zxing/library", () => {
       [243, 238, 794, 245],
       [154, 209, 973, 302],
     ]);
-    expect(filters).toEqual(["none", "none", "grayscale(1) contrast(1.45)"]);
+    expect(filters).toEqual(["none", "none", "none"]);
     expect(context.filter).toBe("none");
+    expect(context.getImageData).toHaveBeenCalledTimes(1);
+    expect(context.putImageData).toHaveBeenCalledTimes(1);
+    expect([...contrastPixels]).toEqual([48, 48, 48, 255]);
   });
 });

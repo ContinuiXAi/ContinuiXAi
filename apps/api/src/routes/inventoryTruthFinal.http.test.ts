@@ -22,6 +22,7 @@ type Session = {
   assignedToId: string | null;
   startedAt: Date;
   completedAt: Date | null;
+  cycleCountClass: string | null;
   routeSnapshot: ReturnType<typeof hint>[];
   updatedAt: Date;
 };
@@ -47,6 +48,8 @@ async function inject(operation: string, who = "a", barcode = "component-upc") {
   await app.register(storeCountRoutes, { prefix: "/count" });
   await app.register(inventoryTruthRoutes, { prefix: "/truth" });
   const options = operation === "scan" ? { method: "POST" as const, url: "/count/sessions/session/scan", payload: { barcodeValue: barcode, locationId: "shelf", quantityDelta: 2, clientScanId: `scan-${who}-${barcode}` } }
+    : operation === "restart" ? { method: "POST" as const, url: "/count/sessions", payload: { siteId: "site", replaceEmptySessionId: "session" } }
+      : operation === "restart-class" ? { method: "POST" as const, url: "/count/sessions", payload: { siteId: "site", replaceEmptySessionId: "session", cycleCountClass: "A" } }
     : operation === "edit" ? { method: "PATCH" as const, url: "/count/sessions/session/entries/entry", payload: { quantity: 7, expectedQuantity: entries[0]?.quantity ?? 0 } }
       : operation === "verify" ? { method: "POST" as const, url: "/truth/counts/session/locations/shelf/verify", payload: { offlineQueueFlushed: true } }
         : operation === "active" ? { method: "GET" as const, url: "/count/sessions/active" }
@@ -67,6 +70,7 @@ beforeEach(() => {
     assignedToId: "a",
     startedAt: new Date(0),
     completedAt: null,
+    cycleCountClass: null,
     routeSnapshot: [hint("component"), hint("absent")],
     updatedAt: new Date(0),
   };
@@ -108,16 +112,33 @@ beforeEach(() => {
     $executeRaw: async () => 1,
     site: { findMany: async () => [{ id: "site", organizationId: "org" }], findFirst: async () => ({ id: "site", organizationId: "org" }), findUnique: async () => ({ organizationId: "org" }) },
     storeLocation: { findUnique: async () => location, findFirst: async () => location },
-    product: { findFirst: async ({ where }: { where: { barcodeValue: string } }) => where.barcodeValue === currentProduct.barcodeValue ? currentProduct : null },
+    product: {
+      findFirst: async ({ where }: { where: { barcodeValue: string } }) => where.barcodeValue === currentProduct.barcodeValue ? currentProduct : null,
+      findMany: async ({ where }: { where: unknown }) => {
+        const query = JSON.stringify(where);
+        return query.includes(currentProduct.barcodeValue)
+          || (currentProduct.id === "parent" && query.includes("display-alias"))
+          ? [currentProduct]
+          : [];
+      },
+    },
     productIdentifier: { findFirst: async ({ where }: { where: { value: string } }) => where.value === "display-alias" && currentProduct.id === "parent" ? { product: currentProduct } : null },
     productComposition: { findFirst: async () => currentProduct.id === "parent" ? { id: "recipe" } : null },
     storeCountSession: {
-      findFirst: async ({ where }: { where: { id?: string; siteId?: string; status?: string; OR?: unknown; assignedToId?: string; startedById?: string } }) => {
+      findFirst: async ({ where }: { where: { id?: string | { not?: string }; siteId?: string; status?: string; cycleCountClass?: string; OR?: unknown; assignedToId?: string; startedById?: string } }) => {
         const sessions = [session, ...createdSessions];
-        if (where.id) {
+        if (typeof where.id === "string") {
           const found = sessions.find((candidate) => candidate.id === where.id);
           if (!found || (found.siteId === null && found.startedById !== actor)) return null;
           return { ...found, site: found.siteId === null ? null : { organizationId: "org" } };
+        }
+        if (where.cycleCountClass) {
+          return sessions.find((candidate) =>
+            candidate.status === where.status
+            && candidate.siteId === where.siteId
+            && candidate.cycleCountClass === where.cycleCountClass
+            && candidate.id !== (typeof where.id === "object" ? where.id.not : undefined),
+          ) ?? null;
         }
         const filtered = where.assignedToId === actor || (JSON.stringify(where.OR ?? []).includes('"assignedToId"'));
         if (!filtered) return { ...session };
@@ -158,7 +179,7 @@ beforeEach(() => {
         Object.assign(target, data, { updatedAt: new Date() });
         return { ...target };
       },
-      create: async ({ data }: { data: { name?: string | null; siteId: string | null; startedById: string; assignedToId: string | null } }) => {
+      create: async ({ data }: { data: { name?: string | null; siteId: string | null; startedById: string; assignedToId: string | null; cycleCountClass?: string | null } }) => {
         const candidate: Session = {
           id: `new-session-${createdSessions.length + 1}`,
           siteId: data.siteId,
@@ -168,6 +189,7 @@ beforeEach(() => {
           assignedToId: data.assignedToId,
           startedAt: new Date(),
           completedAt: null,
+          cycleCountClass: data.cycleCountClass ?? null,
           routeSnapshot: [],
           updatedAt: new Date(),
         };
@@ -198,7 +220,9 @@ beforeEach(() => {
     storeCountExpectation: { findMany: async () => [], createMany: async () => ({}) },
     inventoryTransaction: { groupBy: async () => [] },
     storeCountLocationVisit: {
-      count: async () => verified ? 0 : 1,
+      count: async ({ where }: { where: { status?: { not?: string } } }) => where.status?.not === "PENDING"
+        ? (verified ? 1 : 0)
+        : (verified ? 0 : 1),
       findMany: async () => [{ status: verified ? "VERIFIED" : "PENDING", location }],
       createMany: async () => ({}),
       upsert: async () => { verified = true; return { status: "VERIFIED" }; },
@@ -222,6 +246,78 @@ beforeEach(() => {
 });
 
 describe("whole-branch count counterexamples", () => {
+  it("atomically replaces an empty setup session and makes a retry idempotent", async () => {
+    entries = [];
+
+    const first = await inject("restart", "a");
+    const retry = await inject("restart", "a");
+
+    expect(first.statusCode).toBe(201);
+    expect(retry.statusCode).toBe(200);
+    expect(retry.json().id).toBe(first.json().id);
+    expect(session.status).toBe("CANCELLED");
+    expect(createdSessions).toHaveLength(1);
+  });
+
+  it("preserves the original count name and cycle class when setup replaces an empty session", async () => {
+    entries = [];
+    session.name = "Cosmetics cycle count";
+    session.cycleCountClass = "A";
+
+    const response = await inject("restart", "a");
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json()).toMatchObject({ name: "Cosmetics cycle count", cycleCountClass: "A" });
+  });
+
+  it.each(["CANCELLED", "COMPLETED"])("does not turn a stale %s setup link into another new count", async (status) => {
+    entries = [];
+    session.status = status;
+
+    const response = await inject("restart", "a");
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error).toMatch(/no longer active/i);
+    expect(createdSessions).toHaveLength(0);
+  });
+
+  it("does not replace a setup session after count evidence has been recorded", async () => {
+    const response = await inject("restart", "a");
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error).toMatch(/already has count activity/i);
+    expect(session.status).toBe("ACTIVE");
+    expect(createdSessions).toHaveLength(0);
+  });
+
+  it("does not replace a count after an assigned location was verified", async () => {
+    entries = [];
+    verified = true;
+
+    const response = await inject("restart", "a");
+
+    expect(response.statusCode).toBe(409);
+    expect(session.status).toBe("ACTIVE");
+    expect(createdSessions).toHaveLength(0);
+  });
+
+  it("does not cancel the old count when the requested cycle class is already active", async () => {
+    entries = [];
+    createdSessions.push({
+      ...session,
+      id: "conflicting-class-count",
+      assignedToId: "b",
+      startedById: "b",
+      cycleCountClass: "A",
+    });
+
+    const response = await inject("restart-class", "a");
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error).toMatch(/already in progress/i);
+    expect(session.status).toBe("ACTIVE");
+  });
+
   it("rechecks active actor at the session-start write boundary", async () => {
     mocks.beforeTransaction = () => { authorized = false; };
     expect((await inject("start")).statusCode).toBe(403);

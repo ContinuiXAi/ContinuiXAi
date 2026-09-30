@@ -2,6 +2,9 @@ import { z } from "zod";
 
 export const productInputSchema = z.object({
   barcodeValue: z.string().trim().min(1).max(64).nullable().optional(),
+  // Input-only hint for the two valid meanings of some eight-digit values.
+  // API routes remove this field before writing the Product model.
+  barcodeFormat: z.enum(["UPC_E", "EAN_8", "UPC_A", "EAN_13"]).optional(),
   name: z.string().trim().min(1).max(300),
   manufacturer: z.string().trim().max(200).nullable().optional(),
   description: z.string().trim().max(2000).nullable().optional(),
@@ -32,6 +35,9 @@ export const productCsvNormalizedRowSchema = z.object({
   errors: z.array(z.string()),
   warnings: z.array(z.string()),
   upc: z.string().max(64).nullable(),
+  barcodeFormat: z.enum(["UPC_E", "EAN_8", "UPC_A", "EAN_13"]).nullable(),
+  /** Typed UPC alias retained when the stored value is expanded UPC-A. */
+  barcodeAlias: z.string().max(64).nullable(),
   name: z.string().max(300).nullable(),
   manufacturer: z.string().max(200).nullable(),
   description: z.string().max(2000).nullable(),
