@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act, createElement, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -31,13 +33,17 @@ async function changeValue(element: HTMLInputElement, value: string) {
   });
 }
 
-describe("Google Authenticator sign-in", () => {
+describe("authenticator app sign-in", () => {
   let container: HTMLDivElement;
   let root: Root;
+  let stylesheet: HTMLStyleElement;
 
   beforeEach(() => {
     vi.clearAllMocks();
     vi.stubGlobal("fetch", mocks.fetch);
+    stylesheet = document.createElement("style");
+    stylesheet.textContent = readFileSync(resolve(process.cwd(), "app/globals.css"), "utf8");
+    document.head.appendChild(stylesheet);
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -46,6 +52,7 @@ describe("Google Authenticator sign-in", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
+    stylesheet.remove();
     vi.unstubAllGlobals();
   });
 
@@ -75,13 +82,29 @@ describe("Google Authenticator sign-in", () => {
     await settle();
   }
 
-  it("uses a manual Google Authenticator setup key without displaying a QR code", async () => {
+  it("recommends Proton across phone and desktop without locking out other authenticator apps", async () => {
     await renderSignIn();
     await submitCredentials(true);
 
-    expect(container.textContent).toContain("Google Authenticator");
+    expect(container.textContent).toContain("Proton Authenticator");
+    expect(container.textContent).toContain("Recommended");
+    expect(container.textContent).toContain("Already have another authenticator app?");
     expect(container.textContent).toContain("JBSWY3DPEHPK3PXP");
     expect(container.querySelector('img[alt*="QR"]')).toBeNull();
+
+    const expectedDownloads = [
+      ["Download for iPhone or iPad", "https://apps.apple.com/us/app/proton-authenticator/id6741758667"],
+      ["Download for Android", "https://play.google.com/store/apps/details?id=proton.android.authenticator"],
+      ["Download for Windows, Mac, or Linux", "https://proton.me/authenticator/download"],
+    ];
+    for (const [label, href] of expectedDownloads) {
+      const link = Array.from(container.querySelectorAll<HTMLAnchorElement>("a"))
+        .find((candidate) => candidate.textContent?.includes(label));
+      expect(link?.getAttribute("href")).toBe(href);
+      expect(link?.getAttribute("target")).toBe("_blank");
+      expect(link?.getAttribute("rel")).toBe("noopener noreferrer");
+      expect(getComputedStyle(link!).paddingTop).toBe("12px");
+    }
   });
 
   it("asks an enrolled user only for the current authenticator code", async () => {
@@ -92,5 +115,43 @@ describe("Google Authenticator sign-in", () => {
     expect(container.textContent).not.toContain("Secure Your Account");
     expect(mocks.fetch).toHaveBeenCalledTimes(2);
     expect(mocks.fetch).not.toHaveBeenCalledWith(expect.stringContaining("/mfa/setup"), expect.anything());
+  });
+
+  it("labels the backup-code record with the account holder, login, company, and generation time", async () => {
+    await renderSignIn();
+    await submitCredentials(true);
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      token: "session-token",
+      user: {
+        id: "user-1",
+        name: "Mitchell Kobran",
+        email: "mitchell@josephs.example",
+        employeeNumber: "CX-1001",
+        role: "ADMIN",
+        mfaEnabled: true,
+      },
+      backupCodes: ["CODE-ONE", "CODE-TWO"],
+      backupCodeDocument: {
+        accountHolderName: "Mitchell Kobran",
+        loginEmail: "mitchell@josephs.example",
+        employeeNumber: "CX-1001",
+        organizations: [{ id: "organization-1", name: "Josephs Markets" }],
+        generatedAt: "2026-09-27T15:30:00.000Z",
+      },
+    }), { status: 200 }));
+    const codeInput = container.querySelector<HTMLInputElement>('input[aria-label="6-digit verification code"]')!;
+    await changeValue(codeInput, "123456");
+    await act(async () => {
+      container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await settle();
+
+    expect(container.textContent).toContain("MFA Emergency Backup Codes");
+    expect(container.textContent).toContain("Mitchell Kobran");
+    expect(container.textContent).toContain("mitchell@josephs.example");
+    expect(container.textContent).toContain("Josephs Markets");
+    expect(container.textContent).toContain("CX-1001");
+    expect(container.querySelector('time[datetime="2026-09-27T15:30:00.000Z"]')).not.toBeNull();
+    expect(container.textContent).toContain("Each backup code works only once");
   });
 });

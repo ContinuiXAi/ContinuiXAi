@@ -64,11 +64,24 @@ async function main() {
     return { session, entry, discrepancy, item };
   }
   type Count = Awaited<ReturnType<typeof count>>;
+  async function emptyCount(owner = manager.id) {
+    const item = await product();
+    const session = await prisma.storeCountSession.create({
+      data: { siteId: site.id, startedById: owner, assignedToId: owner, startedAt: new Date(), routeSnapshot: [snapshot(item)] },
+    });
+    await prisma.storeCountAssignmentEvent.create({
+      data: { sessionId: session.id, toUserId: owner, assignedById: owner, reason: "Disposable empty replacement fixture" },
+    });
+    return { session, item };
+  }
+  type EmptyCount = Awaited<ReturnType<typeof emptyCount>>;
   const scan = (c: Count, actor = a.id, key = randomUUID(), barcodeValue = c.item.barcodeValue!, quantityDelta = 1) => send(actor, "POST", `/count/sessions/${c.session.id}/scan`, { barcodeValue, locationId: location.id, quantityDelta, clientScanId: key });
+  const scanEmpty = (c: EmptyCount, actor = manager.id, key = randomUUID()) => send(actor, "POST", `/count/sessions/${c.session.id}/scan`, { barcodeValue: c.item.barcodeValue!, locationId: location.id, quantityDelta: 1, clientScanId: key });
+  const replaceEmpty = (c: EmptyCount, actor = manager.id) => send(actor, "POST", "/count/sessions", { siteId: site.id, replaceEmptySessionId: c.session.id });
   const edit = (c: Count, actor = a.id, quantity = 12, expectedQuantity = c.entry.quantity) => send(actor, "PATCH", `/count/sessions/${c.session.id}/entries/${c.entry.id}`, { quantity, expectedQuantity });
   const verify = (c: Count, actor = a.id) => send(actor, "POST", `/truth/counts/${c.session.id}/locations/${location.id}/verify`, { offlineQueueFlushed: true });
   const finish = (c: Count, actor = a.id) => send(actor, "POST", `/count/sessions/${c.session.id}/complete`);
-  const cancel = (c: Count, actor = a.id) => send(actor, "POST", `/count/sessions/${c.session.id}/cancel`);
+  const cancel = (c: { session: { id: string } }, actor = a.id) => send(actor, "POST", `/count/sessions/${c.session.id}/cancel`);
   const discrepancies = (c: Count, actor = a.id) => send(actor, "GET", `/truth/counts/${c.session.id}/discrepancies`);
   const reassign = (c: Count) => send(manager.id, "POST", `/truth/counts/${c.session.id}/reassign`, { toUserId: b.id, reason: "Audited handoff" });
   async function reviewToken(c: Count) {
@@ -106,7 +119,18 @@ async function main() {
     }
     throw new Error(`Did not observe a blocked ${fragment} query; cross-route schedule is not proven`);
   }
-  async function scheduled(c: Count, requests: Array<() => ReturnType<typeof send>>, beforeCommit?: () => Promise<unknown>) {
+  async function waitForBlockedRequests(expected: number) {
+    const deadline = Date.now() + 3_000;
+    while (Date.now() < deadline) {
+      const result = await observer.query<{ count: number }>(`SELECT COUNT(*)::int AS count FROM pg_stat_activity
+        WHERE pid <> ALL($1::int[]) AND datname = current_database() AND state = 'active'
+          AND cardinality(pg_blocking_pids(pid)) > 0`, [[holderPid]]);
+      if (result.rows[0].count >= expected) return;
+      await sleep(10);
+    }
+    throw new Error(`Did not observe ${expected} blocked requests; concurrent retry schedule is not proven`);
+  }
+  async function scheduled(c: { session: { id: string } }, requests: Array<() => ReturnType<typeof send>>, beforeCommit?: () => Promise<unknown>) {
     await holder.query("BEGIN");
     try {
       await holder.query('SELECT "id" FROM "StoreCountSession" WHERE "id" = $1 FOR UPDATE', [c.session.id]);
@@ -198,23 +222,37 @@ async function main() {
     // the exact midpoint: the real HTTP route must wait on Organization before
     // it can lock the recipient User, allowing the FK update to finish first.
     const crossRoute = await count(await product());
-    await holder.query("BEGIN");
+    // Count-location assignments are manager configuration. Temporarily grant
+    // the recipient the minimum production role required by that route, then
+    // restore the inventory-worker fixture before the remaining policy checks.
+    await prisma.organizationMembership.update({
+      where: { organizationId_userId: { organizationId: org.id, userId: b.id } },
+      data: { role: "MANAGER" },
+    });
     try {
-      await holder.query('SELECT "id" FROM "Organization" WHERE "id" = $1 FOR SHARE', [org.id]);
-      const hintRequest = send(b.id, "POST", `/truth/products/${crossRoute.item.id}/location-hints`, {
-        siteId: site.id,
-        locationId: location.id,
-        evidence: "ASSIGNED",
-        isRequired: true,
+      await holder.query("BEGIN");
+      try {
+        await holder.query('SELECT "id" FROM "Organization" WHERE "id" = $1 FOR SHARE', [org.id]);
+        const hintRequest = send(b.id, "POST", `/truth/products/${crossRoute.item.id}/location-hints`, {
+          siteId: site.id,
+          locationId: location.id,
+          evidence: "ASSIGNED",
+          isRequired: true,
+        });
+        await waitForBlockedQuery('FROM "Organization"');
+        await holder.query('UPDATE "StoreCountSession" SET "assignedToId" = $1 WHERE "id" = $2', [b.id, crossRoute.session.id]);
+        await holder.query("COMMIT");
+        const hintResponse = await hintRequest;
+        assert.equal(hintResponse.statusCode, 201, hintResponse.body);
+      } catch (error) {
+        await holder.query("ROLLBACK");
+        throw error;
+      }
+    } finally {
+      await prisma.organizationMembership.update({
+        where: { organizationId_userId: { organizationId: org.id, userId: b.id } },
+        data: { role: "INVENTORY" },
       });
-      await waitForBlockedQuery('FROM "Organization"');
-      await holder.query('UPDATE "StoreCountSession" SET "assignedToId" = $1 WHERE "id" = $2', [b.id, crossRoute.session.id]);
-      await holder.query("COMMIT");
-      const hintResponse = await hintRequest;
-      assert.equal(hintResponse.statusCode, 201, hintResponse.body);
-    } catch (error) {
-      await holder.query("ROLLBACK");
-      throw error;
     }
     assert.equal((await cancel(crossRoute, b.id)).statusCode, 200);
 
@@ -241,6 +279,70 @@ async function main() {
     assert.match(scanBeforeEditResults[1].json().error, /changed on another device/i);
     assert.equal((await prisma.storeCountEntry.findUniqueOrThrow({ where: { id: scanBeforeEdit.entry.id } })).quantity, 14);
     assert.equal((await cancel(scanBeforeEdit)).statusCode, 200);
+
+    // Empty-count setup replacement and scan share the same session lock. Prove
+    // both real orders: a winning scan preserves the original, while a winning
+    // replacement cancels it and the delayed scan cannot write afterward.
+    const replacementAfterScan = await emptyCount();
+    const scanThenReplace = await scheduled(replacementAfterScan, [
+      () => scanEmpty(replacementAfterScan),
+      () => replaceEmpty(replacementAfterScan),
+    ]);
+    assert.deepEqual(scanThenReplace.map((response) => response.statusCode), [200, 409]);
+    assert.equal((await prisma.storeCountSession.findUniqueOrThrow({ where: { id: replacementAfterScan.session.id } })).status, "ACTIVE");
+    assert.equal(await prisma.storeCountEntry.count({ where: { sessionId: replacementAfterScan.session.id } }), 1);
+    assert.equal((await cancel(replacementAfterScan, manager.id)).statusCode, 200);
+
+    const scanAfterReplacement = await emptyCount();
+    const replaceThenScan = await scheduled(scanAfterReplacement, [
+      () => replaceEmpty(scanAfterReplacement),
+      () => scanEmpty(scanAfterReplacement),
+    ]);
+    assert.deepEqual(replaceThenScan.map((response) => response.statusCode), [201, 409]);
+    const replacementId = replaceThenScan[0].json().id as string;
+    assert.equal((await prisma.storeCountSession.findUniqueOrThrow({ where: { id: scanAfterReplacement.session.id } })).status, "CANCELLED");
+    assert.equal(await prisma.storeCountEntry.count({ where: { sessionId: scanAfterReplacement.session.id } }), 0);
+    assert.equal(await prisma.storeCountSession.count({ where: { siteId: site.id, assignedToId: manager.id, status: "ACTIVE" } }), 1);
+    assert.equal((await send(manager.id, "POST", `/count/sessions/${replacementId}/cancel`)).statusCode, 200);
+
+    // Revocation commits while replacement is blocked on the old session. The
+    // route must re-check membership under lock, preserve the original, and
+    // create no replacement or extra assignment history.
+    const revokedReplacement = await emptyCount();
+    const replacementEventsBefore = await prisma.storeCountAssignmentEvent.count({ where: { sessionId: revokedReplacement.session.id } });
+    const revokedResponse = await scheduled(revokedReplacement, [() => replaceEmpty(revokedReplacement)], async () => {
+      await holder.query('UPDATE "SiteMembership" SET "isActive" = FALSE WHERE "siteId" = $1 AND "userId" = $2', [site.id, manager.id]);
+    });
+    assert.equal(revokedResponse[0].statusCode, 404, revokedResponse[0].body);
+    assert.equal((await prisma.storeCountSession.findUniqueOrThrow({ where: { id: revokedReplacement.session.id } })).status, "ACTIVE");
+    assert.equal(await prisma.storeCountAssignmentEvent.count({ where: { sessionId: revokedReplacement.session.id } }), replacementEventsBefore);
+    assert.equal(await prisma.storeCountSession.count({ where: { siteId: site.id, assignedToId: manager.id, status: "ACTIVE" } }), 1);
+    await prisma.siteMembership.update({ where: { siteId_userId: { siteId: site.id, userId: manager.id } }, data: { isActive: true } });
+    assert.equal((await send(manager.id, "POST", `/count/sessions/${revokedReplacement.session.id}/cancel`)).statusCode, 200);
+
+    // Concurrent retries serialize on the same advisory/session locks. Exactly
+    // one creates the replacement; every retry resumes that identical session.
+    const retryReplacement = await emptyCount();
+    await holder.query("BEGIN");
+    let retryResponses: Awaited<ReturnType<typeof send>>[] = [];
+    try {
+      await holder.query('SELECT "id" FROM "StoreCountSession" WHERE "id" = $1 FOR UPDATE', [retryReplacement.session.id]);
+      const pendingRetries = Array.from({ length: 5 }, () => Promise.resolve(replaceEmpty(retryReplacement)));
+      await waitForBlockedRequests(pendingRetries.length);
+      await holder.query("COMMIT");
+      retryResponses = await Promise.all(pendingRetries);
+    } catch (error) {
+      await holder.query("ROLLBACK");
+      throw error;
+    }
+    assert.equal(retryResponses.filter((response) => response.statusCode === 201).length, 1);
+    assert.equal(retryResponses.filter((response) => response.statusCode === 200).length, 4);
+    const retryReplacementIds = new Set(retryResponses.map((response) => response.json().id as string));
+    assert.equal(retryReplacementIds.size, 1);
+    const retryReplacementId = [...retryReplacementIds][0];
+    assert.equal((await prisma.storeCountSession.findUniqueOrThrow({ where: { id: retryReplacement.session.id } })).status, "CANCELLED");
+    assert.equal(await prisma.storeCountSession.count({ where: { siteId: site.id, assignedToId: manager.id, status: "ACTIVE" } }), 1);
+    assert.equal((await send(manager.id, "POST", `/count/sessions/${retryReplacementId}/cancel`)).statusCode, 200);
 
     // Omitted product is not zero, even with a stale VERIFIED visit and reason.
     const evidence = await count(await product()); const missing = await product();

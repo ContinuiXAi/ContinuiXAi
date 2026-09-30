@@ -1,16 +1,71 @@
 import type { FastifyInstance } from "fastify";
-import { productInputSchema, productUpdateSchema } from "@continuixai/shared";
+import type { Prisma } from "@prisma/client";
+import { ambiguousRetailBarcodeAlternate, inferRetailBarcodeFormat, normalizeRetailBarcode, preferredRetailBarcode, productInputSchema, productUpdateSchema, upcEAliasForRetailBarcode, type RetailBarcodeFormat } from "@continuixai/shared";
 import { z } from "zod";
 import { prisma } from "../lib/prisma.js";
 import { isUniqueConstraintError } from "../lib/prismaErrors.js";
 import { resolveOrganizationContext } from "../lib/organizationContext.js";
 import { lockActorOrganizationAccess } from "../lib/accessLocking.js";
+import { BARCODE_ALIAS_SOURCE, BARCODE_PRIMARY_SOURCE, MANAGED_BARCODE_SOURCES, lockProductBarcodeWrites, retailBarcodeDuplicateWhere, retailBarcodeProductWhere } from "../lib/productBarcodeIdentity.js";
 import {
   MAX_INVENTORY_QUANTITY,
   aggregateCompositionDefinition,
 } from "../lib/packagingResolution.js";
 
 type ProductQuery = { q?: string; includeInactive?: string; organizationId?: string };
+
+type CanonicalProductBarcodeResult =
+  | { value: string | null | undefined; format: RetailBarcodeFormat | null; upcEAlias: string | null; primaryIdentifier: { type: "EAN"; value: string; source: string } | null }
+  | { error: string; code: 400 | 422 };
+
+function canonicalProductBarcode(
+  barcodeValue: string | null | undefined,
+  barcodeFormat?: RetailBarcodeFormat,
+): CanonicalProductBarcodeResult {
+  if (barcodeFormat && !barcodeValue) {
+    return { error: "Choose a barcode before selecting its format.", code: 400 as const };
+  }
+  if (!barcodeValue) return { value: barcodeValue, format: null, upcEAlias: null, primaryIdentifier: null };
+  if (!barcodeFormat && /^\d{8}$/.test(barcodeValue) && ambiguousRetailBarcodeAlternate(barcodeValue)) {
+    return {
+      error: "This 8-digit code can be UPC-E or EAN-8. Scan it with the camera or choose its barcode format.",
+      code: 422 as const,
+    };
+  }
+  const normalized = barcodeFormat
+    ? normalizeRetailBarcode(barcodeValue, barcodeFormat)
+    : preferredRetailBarcode(barcodeValue);
+  if (!normalized) {
+    return { error: `The barcode is not a valid ${barcodeFormat?.replace("_", "-") ?? "retail code"}.`, code: 400 as const };
+  }
+  // The stored value is canonical. A leading-zero EAN-13 and a UPC-E both
+  // normalize to UPC-A, so downstream duplicate checks must use the stored
+  // identity rather than the caller's original label format.
+  const inferredFormat: RetailBarcodeFormat | null = barcodeFormat === "EAN_8" && /^\d{8}$/.test(normalized)
+    ? "EAN_8"
+    : inferRetailBarcodeFormat(normalized);
+  const upcEAlias = inferredFormat === "UPC_A"
+    ? upcEAliasForRetailBarcode(normalized)
+    : null;
+  const primaryIdentifier = inferredFormat === "EAN_8"
+    ? { type: "EAN" as const, value: normalized, source: BARCODE_PRIMARY_SOURCE }
+    : null;
+  return { value: normalized, format: inferredFormat, upcEAlias, primaryIdentifier };
+}
+
+function managedBarcodeIdentifiers(
+  organizationId: string,
+  canonical: Exclude<CanonicalProductBarcodeResult, { error: string; code: 400 | 422 }>,
+) {
+  return [
+    ...(canonical.upcEAlias
+      ? [{ organizationId, type: "UPC" as const, value: canonical.upcEAlias, source: BARCODE_ALIAS_SOURCE }]
+      : []),
+    ...(canonical.primaryIdentifier
+      ? [{ organizationId, ...canonical.primaryIdentifier }]
+      : []),
+  ];
+}
 
 const compositionInputSchema = z.object({
   parentPackagingId: z.string().trim().min(1),
@@ -26,6 +81,25 @@ async function organizationForRequest(request: {
 }) {
   const query = request.query as ProductQuery;
   return resolveOrganizationContext(request.user.sub, request.user.role, query.organizationId?.trim() || undefined);
+}
+
+async function lockProductCatalogAccess(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  platformRole: string | undefined,
+  organizationId: string,
+) {
+  if (platformRole !== "ADMIN") {
+    return Boolean(await lockActorOrganizationAccess(tx, userId, organizationId, "update"));
+  }
+  const organizations = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT "id" FROM "Organization" WHERE "id" = ${organizationId} AND "isActive" = TRUE FOR UPDATE
+  `;
+  if (!organizations[0]) return false;
+  const actors = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT "id" FROM "User" WHERE "id" = ${userId} AND "isActive" = TRUE AND "role" = 'ADMIN' FOR UPDATE
+  `;
+  return Boolean(actors[0]);
 }
 
 export async function productRoutes(app: FastifyInstance) {
@@ -61,10 +135,36 @@ export async function productRoutes(app: FastifyInstance) {
     const context = await organizationForRequest(request);
     if (!context) return reply.code(400).send({ error: "select one authorized organization" });
     const { barcode } = request.params as { barcode: string };
-    const product = await prisma.product.findFirst({
-      where: { organizationId: context.organizationId, barcodeValue: barcode },
+    // A product's exact primary barcode wins over aliases. This is essential
+    // for dual-valid eight-digit labels: an EAN-8 may legitimately equal a
+    // different UPC product's typed UPC-E alias.
+    const exactMatches = await prisma.product.findMany({
+      where: { organizationId: context.organizationId, barcodeValue: barcode.trim() },
       include: { category: true },
+      take: 2,
     });
+    const matches = exactMatches.length > 0
+      ? exactMatches
+      : await prisma.product.findMany({
+          where: retailBarcodeProductWhere(context.organizationId, barcode),
+          include: { category: true },
+          take: 2,
+        });
+    const ambiguousAlternate = ambiguousRetailBarcodeAlternate(barcode);
+    const conflictMatches = ambiguousAlternate && matches.length === 0
+      ? await prisma.product.findMany({
+          where: retailBarcodeProductWhere(context.organizationId, barcode, { includeAmbiguousAlternate: true }),
+          include: { category: true },
+          take: 2,
+        })
+      : matches;
+    if (matches.length > 1 || (matches.length === 0 && conflictMatches.length > 0)) {
+      return reply.code(409).send({ error: "barcode matches more than one product; review the catalog" });
+    }
+    const product = matches[0] ?? null;
+    if (!product && /^\d{8}$/.test(barcode.trim()) && ambiguousAlternate) {
+      return reply.code(422).send({ error: "This 8-digit code can be UPC-E or EAN-8. Configure the scanner to send UPC-A, use the camera, or select the product manually." });
+    }
     if (!product) return reply.code(404).send({ error: "product not found" });
     return product;
   });
@@ -201,12 +301,43 @@ export async function productRoutes(app: FastifyInstance) {
     if (!context) return reply.code(400).send({ error: "select one authorized organization" });
     const parsed = productInputSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    const { barcodeFormat, ...productData } = parsed.data;
+    const canonical = canonicalProductBarcode(productData.barcodeValue, barcodeFormat);
+    if ("error" in canonical) return reply.code(canonical.code).send({ error: canonical.error });
+    const barcodeValue = canonical.value;
 
     try {
-      const product = await prisma.product.create({
-        data: { ...parsed.data, organizationId: context.organizationId },
+      const result = await prisma.$transaction(async (tx) => {
+        const authorized = await lockProductCatalogAccess(tx, request.user.sub, request.user.role, context.organizationId);
+        if (!authorized) return { forbidden: true as const };
+        await lockProductBarcodeWrites(tx, context.organizationId);
+        if (barcodeValue) {
+          const duplicate = await tx.product.findMany({
+            where: retailBarcodeDuplicateWhere(context.organizationId, barcodeValue, canonical.format, canonical.upcEAlias),
+            select: { id: true },
+            take: 1,
+          });
+          if (duplicate.length > 0) return { forbidden: false as const, duplicate: true as const };
+        }
+        const product = await tx.product.create({
+          data: {
+            ...productData,
+            barcodeValue,
+            organizationId: context.organizationId,
+            ...(managedBarcodeIdentifiers(context.organizationId, canonical).length > 0
+              ? {
+                  identifiers: {
+                    create: managedBarcodeIdentifiers(context.organizationId, canonical),
+                  },
+                }
+              : {}),
+          },
+        });
+        return { forbidden: false as const, duplicate: false as const, product };
       });
-      return reply.code(201).send(product);
+      if (result.forbidden) return reply.code(403).send({ error: "active organization membership required" });
+      if (result.duplicate) return reply.code(409).send({ error: `A product with barcode "${parsed.data.barcodeValue}" already exists.` });
+      return reply.code(201).send(result.product);
     } catch (err) {
       if (isUniqueConstraintError(err)) {
         return reply.code(409).send({ error: `A product with barcode "${parsed.data.barcodeValue}" already exists.` });
@@ -221,14 +352,59 @@ export async function productRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const parsed = productUpdateSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    const { barcodeFormat, ...productData } = parsed.data;
+    if (barcodeFormat && productData.barcodeValue === undefined) {
+      return reply.code(400).send({ error: "Choose a barcode before selecting its format." });
+    }
+    const canonical = canonicalProductBarcode(productData.barcodeValue, barcodeFormat);
+    if ("error" in canonical) return reply.code(canonical.code).send({ error: canonical.error });
+    const data = productData.barcodeValue === undefined
+      ? productData
+      : { ...productData, barcodeValue: canonical.value };
 
     try {
-      const existing = await prisma.product.findFirst({
-        where: { id, organizationId: context.organizationId },
-        select: { id: true },
+      const result = await prisma.$transaction(async (tx) => {
+        const authorized = await lockProductCatalogAccess(tx, request.user.sub, request.user.role, context.organizationId);
+        if (!authorized) return { status: "forbidden" as const };
+        await lockProductBarcodeWrites(tx, context.organizationId);
+        const existing = await tx.product.findFirst({
+          where: { id, organizationId: context.organizationId },
+          select: { id: true },
+        });
+        if (!existing) return { status: "missing" as const };
+        if (data.barcodeValue) {
+          const duplicate = await tx.product.findMany({
+            where: { ...retailBarcodeDuplicateWhere(context.organizationId, data.barcodeValue, canonical.format, canonical.upcEAlias), id: { not: existing.id } },
+            select: { id: true },
+            take: 1,
+          });
+          if (duplicate.length > 0) return { status: "duplicate" as const };
+        }
+        const managedIdentifiers = managedBarcodeIdentifiers(context.organizationId, canonical);
+        const product = await tx.product.update({
+          where: { id: existing.id },
+          data: {
+            ...data,
+            ...(productData.barcodeValue !== undefined
+              ? {
+                  identifiers: {
+                    deleteMany: { source: { in: [...MANAGED_BARCODE_SOURCES] } },
+                    ...(managedIdentifiers.length > 0
+                      ? {
+                          create: managedIdentifiers,
+                        }
+                      : {}),
+                  },
+                }
+              : {}),
+          },
+        });
+        return { status: "updated" as const, product };
       });
-      if (!existing) return reply.code(404).send({ error: "product not found" });
-      return await prisma.product.update({ where: { id: existing.id }, data: parsed.data });
+      if (result.status === "forbidden") return reply.code(403).send({ error: "active organization membership required" });
+      if (result.status === "missing") return reply.code(404).send({ error: "product not found" });
+      if (result.status === "duplicate") return reply.code(409).send({ error: "That barcode is already assigned to another product." });
+      return result.product;
     } catch (err) {
       if (isUniqueConstraintError(err)) {
         return reply.code(409).send({ error: "That barcode is already assigned to another product." });

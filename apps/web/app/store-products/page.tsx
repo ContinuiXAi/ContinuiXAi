@@ -11,9 +11,9 @@ import type { InventoryStockSite, InventoryStockState } from "../../lib/types";
 
 type Category = { id: string; name: string; isActive?: boolean };
 type Product = { id: string; barcodeValue: string | null; name: string; manufacturer: string | null; description: string | null; packageSize: string | null; imageUrl: string | null; categoryId: string | null; category?: Category | null; isActive: boolean };
-type ProductDraft = { name: string; manufacturer: string; description: string; packageSize: string; imageUrl: string; categoryId: string; barcodeValue: string };
+type ProductDraft = { name: string; manufacturer: string; description: string; packageSize: string; imageUrl: string; categoryId: string; barcodeValue: string; barcodeFormat: "" | "UPC_E" | "EAN_8" };
 type ProductCsvPreview = { previewId: string; organizationId: string; errorCsv: string; totals: { rows: number; valid: number; warnings: number; errors: number }; rows: Array<{ row: number; status: "valid" | "warning" | "error"; errors: string[]; warnings: string[] }> };
-const emptyProduct: ProductDraft = { name: "", manufacturer: "", description: "", packageSize: "", imageUrl: "", categoryId: "", barcodeValue: "" };
+const emptyProduct: ProductDraft = { name: "", manufacturer: "", description: "", packageSize: "", imageUrl: "", categoryId: "", barcodeValue: "", barcodeFormat: "" };
 
 export default function StoreProductsPage() {
   const router = useRouter();
@@ -94,7 +94,7 @@ export default function StoreProductsPage() {
     if (!draft.name.trim()) return;
     setSaving(true);
     try {
-      await apiJson("/api/products", { method: "POST", body: JSON.stringify({ barcodeValue: draft.barcodeValue.trim() || null, name: draft.name.trim(), manufacturer: draft.manufacturer.trim() || null, description: draft.description.trim() || null, packageSize: draft.packageSize.trim() || null, imageUrl: draft.imageUrl.trim() || null, categoryId: draft.categoryId || null, isActive: true }) });
+      await apiJson("/api/products", { method: "POST", body: JSON.stringify({ barcodeValue: draft.barcodeValue.trim() || null, ...(draft.barcodeFormat ? { barcodeFormat: draft.barcodeFormat } : {}), name: draft.name.trim(), manufacturer: draft.manufacturer.trim() || null, description: draft.description.trim() || null, packageSize: draft.packageSize.trim() || null, imageUrl: draft.imageUrl.trim() || null, categoryId: draft.categoryId || null, isActive: true }) });
       show(`${draft.name.trim()} added`, "success"); setDraft(emptyProduct); setAdding(false); await load();
     } catch (error) { show(error instanceof Error ? error.message : "Could not add product.", "error"); }
     finally { setSaving(false); }
@@ -108,7 +108,7 @@ export default function StoreProductsPage() {
   }
 
   function downloadTemplate() {
-    downloadCsv("upc,name,manufacturer,description,package_size,category,is_active\r\n", "product-import-template.csv");
+    downloadCsv("upc,name,manufacturer,description,package_size,category,is_active,barcode_format\r\n", "product-import-template.csv");
   }
 
   async function reviewCsv() {
@@ -166,7 +166,18 @@ export default function StoreProductsPage() {
       <p><a href="/inventory-history">Inventory history</a></p>
       {adding && <form onSubmit={addProduct} className="card" style={{ padding: 16, marginBottom: 16, display: "grid", gap: 10 }}>
         <strong>Manual product entry</strong>
-        <input inputMode="numeric" placeholder="UPC (optional)" value={draft.barcodeValue} onChange={(event) => setDraft({ ...draft, barcodeValue: event.target.value })} />
+        <input inputMode="numeric" placeholder="UPC (optional)" value={draft.barcodeValue} onChange={(event) => {
+          const barcodeValue = event.target.value;
+          setDraft({ ...draft, barcodeValue, barcodeFormat: /^\d{8}$/.test(barcodeValue.trim()) ? draft.barcodeFormat : "" });
+        }} />
+        {/^[0-9]{8}$/.test(draft.barcodeValue.trim()) && <label style={{ display: "grid", gap: 5 }}>8-digit barcode type
+          <select aria-label="8-digit barcode type" value={draft.barcodeFormat} onChange={(event) => setDraft({ ...draft, barcodeFormat: event.target.value as ProductDraft["barcodeFormat"] })}>
+            <option value="">Auto-detect</option>
+            <option value="UPC_E">UPC-E (compressed UPC)</option>
+            <option value="EAN_8">EAN-8</option>
+          </select>
+          <span style={{ fontSize: 13, opacity: 0.72 }}>If Auto-detect asks you to choose, use the type printed by the scanner or supplier.</span>
+        </label>}
         <input placeholder="Product name *" value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
         <input placeholder="Manufacturer / Brand" value={draft.manufacturer} onChange={(event) => setDraft({ ...draft, manufacturer: event.target.value })} />
         <textarea rows={2} placeholder="Description" value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} />
@@ -177,7 +188,7 @@ export default function StoreProductsPage() {
       </form>}
       <section className="card" style={{ padding: 16, marginBottom: 16, display: "grid", gap: 10 }} aria-label="Product CSV import">
         <strong>Import products from CSV</strong>
-        <span style={{ fontSize: 13, opacity: 0.72 }}>Use the template, then review every row before anything is imported. Maximum 5 MiB and 10,000 rows. Inventory quantities are never imported here. Leave category blank; tenant-scoped category imports are not yet supported.</span>
+        <span style={{ fontSize: 13, opacity: 0.72 }}>Use the template, then review every row before anything is imported. For an ambiguous 8-digit code, set barcode_format to UPC_E or EAN_8. Maximum 5 MiB and 10,000 rows. Inventory quantities are never imported here. Leave category blank; tenant-scoped category imports are not yet supported.</span>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}><button type="button" className="secondary" onClick={downloadTemplate}>Download Template</button><label className="secondary" style={{ cursor: "pointer" }}>Choose CSV<input aria-label="Choose CSV" type="file" accept="text/csv,.csv" disabled={reviewingCsv || importingCsv} style={{ display: "none" }} onChange={(event) => { setCsvFile(event.target.files?.[0] ?? null); setCsvPreview(null); }} /></label><button type="button" onClick={() => void reviewCsv()} disabled={!csvFile || reviewingCsv || importingCsv}>{reviewingCsv ? "Reviewing…" : "Review"}</button></div>
         {csvFile && <span style={{ fontSize: 13 }}>Selected: {csvFile.name}. Review it before importing.</span>}
         {csvPreview && <div style={{ display: "grid", gap: 7 }}>

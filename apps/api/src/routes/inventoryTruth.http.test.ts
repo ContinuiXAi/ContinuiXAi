@@ -711,6 +711,29 @@ describe("inventory truth HTTP routes", () => {
     await app.close();
   });
 
+  it("rejects a location assignment from an active member without a manager role", async () => {
+    mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const sql = normalizedSql(strings);
+      if (sql.includes('FROM "Organization"')) return [{ id: "org-a" }];
+      if (sql.includes('FROM "User"')) return [{ id: "user-a", role: "GENERAL", isActive: true }];
+      if (sql.includes('FROM "OrganizationMembership"')) return [{ organizationId: "org-a", role: "VIEWER" }];
+      if (sql.includes('FROM "Site"')) return [activeSite];
+      if (sql.includes('FROM "SiteMembership"')) return [{ siteId: "site-a" }];
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+    const app = await testApp();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/inventory-truth/products/product-a/location-hints",
+      payload: { siteId: "site-a", locationId: "shelf", evidence: "ASSIGNED", isRequired: true },
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(mocks.hintUpsert).not.toHaveBeenCalled();
+    await app.close();
+  });
+
   it("locks location-hint authorization in the global relation order", async () => {
     const lockOrder: string[] = [];
     mocks.transactionQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
@@ -721,7 +744,7 @@ describe("inventory truth HTTP routes", () => {
       }
       if (sql.includes('FROM "OrganizationMembership"')) {
         lockOrder.push("organization-membership");
-        return [{ organizationId: "org-a", role: "INVENTORY" }];
+        return [{ organizationId: "org-a", role: "MANAGER" }];
       }
       if (sql.includes('FROM "Organization"')) {
         lockOrder.push("organization");

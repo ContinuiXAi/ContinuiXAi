@@ -2,6 +2,8 @@ export type QuaggaResult = {
   codeResult?: { code?: string; format?: string };
 };
 
+export { normalizeRetailBarcode } from "@continuixai/shared";
+
 export type QuaggaApi = {
   decodeSingle: (config: Record<string, unknown>, callback: (result: QuaggaResult | null) => void) => void;
 };
@@ -56,6 +58,24 @@ export function getRetailScannerFocusRegion(width: number, height: number) {
     sy: Math.max(0, Math.round((height - sh) / 2)),
     sw,
     sh,
+  };
+}
+
+export function getRetailScannerCapturePlan(width: number, height: number, attempt: number) {
+  const variant = ((attempt % 3) + 3) % 3;
+  const [widthRatio, heightRatio, contrast] = variant === 1
+    ? [0.62, 0.34, false] as const
+    : variant === 2
+      ? [0.76, 0.42, true] as const
+      : [0.76, 0.42, false] as const;
+  const sw = Math.max(1, Math.round(width * widthRatio));
+  const sh = Math.max(1, Math.round(height * heightRatio));
+  return {
+    sx: Math.max(0, Math.round((width - sw) / 2)),
+    sy: Math.max(0, Math.round((height - sh) / 2)),
+    sw,
+    sh,
+    contrast,
   };
 }
 

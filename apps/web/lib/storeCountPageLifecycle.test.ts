@@ -7,7 +7,7 @@ const mocks = vi.hoisted(() => ({
   apiFetch: vi.fn(),
   push: vi.fn(),
   show: vi.fn(),
-  user: { id: "employee-a" } as { id: string },
+  user: { id: "employee-a", role: "GENERAL", taskManager: false } as { id: string; role?: "ADMIN" | "GENERAL"; taskManager?: boolean },
   createCountScanId: vi.fn(),
   enqueueCountScan: vi.fn(),
   cameraCallback: null as null | ((result?: { getText: () => string; getBarcodeFormat: () => number }) => void),
@@ -33,9 +33,9 @@ vi.mock("./auth-context", () => ({
   useAuth: () => ({ user: mocks.user, loading: false }),
 }));
 vi.mock("./toast-context", () => ({ useToast: () => ({ show: mocks.show }) }));
-vi.mock("./barcodeScanner", () => ({
+vi.mock("./barcodeScanner", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./barcodeScanner")>(),
   createScanHints: vi.fn(async () => new Map()),
-  isQrScanFormat: (format: number) => format === 11,
   SCAN_VIDEO_CONSTRAINTS: {},
 }));
 vi.mock("./scannerEngine", async (importOriginal) => ({
@@ -193,7 +193,7 @@ describe("Store Count pending-item lifecycle", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     idSequence = 0;
-    mocks.user = { id: "employee-a" };
+    mocks.user = { id: "employee-a", role: "GENERAL", taskManager: false };
     mocks.cameraCallback = null;
     localStorage.clear();
     mocks.persistedScannerStatus = null;
@@ -758,6 +758,47 @@ describe("Store Count pending-item lifecycle", () => {
     expect(container.textContent).not.toContain("Product not recognized");
   });
 
+  it("rejects an invalid UPC check digit before product lookup", async () => {
+    await renderPage();
+
+    await act(async () => mocks.cameraCallback?.({
+      getText: () => "036000291453",
+      getBarcodeFormat: () => 14,
+    }));
+
+    expect(mocks.apiJson.mock.calls.some(([url]) => String(url).includes("/api/products/by-barcode/"))).toBe(false);
+  });
+
+  it("looks up an EAN-13 encoded UPC-A by its canonical 12-digit UPC", async () => {
+    await renderPage();
+    mocks.apiJson.mockImplementation(async (url: string) => {
+      if (url === "/api/products/by-barcode/036000291452") return product("product-a", "036000291452", "Test product");
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    await act(async () => mocks.cameraCallback?.({
+      getText: () => "0036000291452",
+      getBarcodeFormat: () => 7,
+    }));
+
+    expect(mocks.apiJson).toHaveBeenCalledWith("/api/products/by-barcode/036000291452", expect.any(Object));
+  });
+
+  it("looks up a compressed UPC-E cosmetic label by its expanded UPC-A value", async () => {
+    await renderPage();
+    mocks.apiJson.mockImplementation(async (url: string) => {
+      if (url === "/api/products/by-barcode/042000001007") return product("product-a", "042000001007", "Compact cosmetic");
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    await act(async () => mocks.cameraCallback?.({
+      getText: () => "04210007",
+      getBarcodeFormat: () => 15,
+    }));
+
+    expect(mocks.apiJson).toHaveBeenCalledWith("/api/products/by-barcode/042000001007", expect.any(Object));
+  });
+
   it("escalates scanner help over time and resets it after an item is cancelled", async () => {
     vi.useFakeTimers();
     const scannedProduct = product("product-a", "012345678905", "Vitamin B12");
@@ -1088,6 +1129,24 @@ describe("Store Count pending-item lifecycle", () => {
     await renderPage(managed, { sessionId: managed.id, expectedProducts: 0, locations: [] });
     expect(container.textContent).toContain("No count locations are assigned");
     expect(container.querySelector('[aria-label="Count location"]')).toBeNull();
+  });
+
+  it("gives a manager a direct setup action from an empty managed count", async () => {
+    mocks.user = { id: "manager-a", role: "GENERAL", taskManager: true };
+    const managed = { ...countSession("managed-empty"), siteId: "site-a" };
+    await renderPage(managed, { sessionId: managed.id, expectedProducts: 0, locations: [] });
+
+    const setup = container.querySelector<HTMLAnchorElement>('a[href^="/store-count/setup"]');
+    expect(setup?.getAttribute("href")).toBe("/store-count/setup?sessionId=managed-empty&siteId=site-a");
+    expect(setup?.textContent).toContain("Set up count locations");
+  });
+
+  it("does not offer count setup to an employee without manager permission", async () => {
+    const managed = { ...countSession("managed-empty"), siteId: "site-a" };
+    await renderPage(managed, { sessionId: managed.id, expectedProducts: 0, locations: [] });
+
+    expect(container.querySelector('a[href^="/store-count/setup"]')).toBeNull();
+    expect(container.querySelector<HTMLAnchorElement>('a[href="/my-work"]')?.textContent).toContain("Return to My Work");
   });
 
   it("keeps compact selected-product evidence above quantity confirmation and returns focus after cancel and save", async () => {

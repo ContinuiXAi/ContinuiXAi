@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   user: { id: "user-1", name: "User", email: "user@example.test", employeeNumber: "EMP-1", role: "GENERAL" as const, isActive: true, tokenVersion: 1, mfaEnabled: true, mfaSecretEncrypted: "encrypted", mfaBackupCodeHashes: [], mfaLastTotpCounter: null as bigint | null },
   updateMany: vi.fn(),
   update: vi.fn(),
+  organizationMembershipFindMany: vi.fn(),
   session: vi.fn(),
   qr: vi.fn(async () => "data:image/png;base64,test"),
 }));
@@ -16,7 +17,7 @@ vi.mock("../lib/prisma.js", () => ({ prisma: { user: {
   findUniqueOrThrow: vi.fn(async () => ({ ...mocks.user })),
   updateMany: mocks.updateMany,
   update: mocks.update,
-} } }));
+}, organizationMembership: { findMany: mocks.organizationMembershipFindMany } } }));
 vi.mock("../lib/sessionService.js", () => ({ createUserSession: mocks.session }));
 vi.mock("../lib/mfa.js", () => ({
   consumeBackupCode: vi.fn(async () => ({ valid: false, remaining: [] })),
@@ -49,6 +50,7 @@ describe("MFA replay controls", () => {
     vi.clearAllMocks();
     Object.assign(mocks.user, { tokenVersion: 1, mfaEnabled: true, mfaSecretEncrypted: "encrypted", mfaBackupCodeHashes: [], mfaLastTotpCounter: null });
     mocks.session.mockResolvedValue({ id: "session-1" });
+    mocks.organizationMembershipFindMany.mockResolvedValue([]);
   });
 
   it("refuses to reopen setup after enrollment is complete", async () => {
@@ -90,6 +92,53 @@ describe("MFA replay controls", () => {
     const replay = await instance.inject({ method: "POST", url: "/api/auth/mfa/confirm", payload: { challengeToken: token, code: "123456" } });
     expect(first.statusCode).toBe(200);
     expect(replay.statusCode).toBe(401);
+    await instance.close();
+  });
+
+  it("returns a printable account and company record with newly generated backup codes", async () => {
+    Object.assign(mocks.user, { mfaEnabled: false });
+    mocks.updateMany.mockImplementationOnce(async () => {
+      Object.assign(mocks.user, { mfaEnabled: true, tokenVersion: 2, mfaLastTotpCounter: 100n });
+      return { count: 1 };
+    });
+    mocks.organizationMembershipFindMany.mockResolvedValue([
+      { organization: { id: "organization-1", name: "Josephs Markets" } },
+    ]);
+    const instance = await app();
+
+    const response = await instance.inject({
+      method: "POST",
+      url: "/api/auth/mfa/confirm",
+      payload: { challengeToken: challenge(instance, "mfa-setup"), code: "123456" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      backupCodes: ["BACKUP"],
+      backupCodeDocument: {
+        accountHolderName: "User",
+        loginEmail: "user@example.test",
+        employeeNumber: "EMP-1",
+        organizations: [{ id: "organization-1", name: "Josephs Markets" }],
+      },
+    });
+    expect(Date.parse(response.json().backupCodeDocument.generatedAt)).not.toBeNaN();
+    await instance.close();
+  });
+
+  it("does not commit MFA enrollment when the printable company record cannot be loaded", async () => {
+    Object.assign(mocks.user, { mfaEnabled: false });
+    mocks.organizationMembershipFindMany.mockRejectedValueOnce(new Error("database unavailable"));
+    const instance = await app();
+
+    const response = await instance.inject({
+      method: "POST",
+      url: "/api/auth/mfa/confirm",
+      payload: { challengeToken: challenge(instance, "mfa-setup"), code: "123456" },
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(mocks.updateMany).not.toHaveBeenCalled();
     await instance.close();
   });
 });

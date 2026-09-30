@@ -60,6 +60,37 @@ describe("pilot product catalog", () => {
     });
   }
 
+  it("lets a manager identify an ambiguous eight-digit barcode as EAN-8", async () => {
+    mockCatalog(async () => ({ rows: [], nextCursor: null }));
+    await act(async () => root.render(createElement(StoreProductsPage)));
+    const addButton = Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "Add product")!;
+    await act(async () => addButton.click());
+
+    const barcode = container.querySelector<HTMLInputElement>('input[placeholder="UPC (optional)"]')!;
+    const name = container.querySelector<HTMLInputElement>('input[placeholder="Product name *"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(barcode, "01234558");
+      barcode.dispatchEvent(new Event("input", { bubbles: true }));
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(name, "EAN-8 item");
+      name.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    const format = container.querySelector<HTMLSelectElement>('select[aria-label="8-digit barcode type"]');
+    expect(format).not.toBeNull();
+    await act(async () => {
+      format!.value = "EAN_8";
+      format!.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    mocks.apiJson.mockResolvedValueOnce({ id: "ean-8-product" });
+    const save = Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "Save product")!;
+    await act(async () => save.click());
+
+    expect(mocks.apiJson).toHaveBeenCalledWith("/api/products", expect.objectContaining({
+      method: "POST",
+      body: expect.stringContaining('"barcodeFormat":"EAN_8"'),
+    }));
+  });
+
   it("makes the historical quantity report discoverable from Products", async () => {
     mockCatalog(async () => stockPage("first"));
     await act(async () => root.render(createElement(StoreProductsPage)));

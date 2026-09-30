@@ -113,7 +113,7 @@ describe("product CSV onboarding", () => {
     await act(async () => button("Download Template").click());
     const blob = createObjectURL.mock.calls[0][0] as Blob;
     const text = await new Promise<string>((resolve) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result as string); reader.readAsText(blob); });
-    expect(text).toBe("upc,name,manufacturer,description,package_size,category,is_active\r\n");
+    expect(text).toBe("upc,name,manufacturer,description,package_size,category,is_active,barcode_format\r\n");
     vi.unstubAllGlobals();
   });
 

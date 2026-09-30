@@ -203,7 +203,8 @@ select {
   background-position: right 14px center;
 }
 
-button {
+button,
+a.button {
   font-size: 1rem;
   padding: 12px 16px;
   border-radius: 10px;
@@ -214,7 +215,8 @@ button {
   min-height: 44px;
 }
 
-button.secondary {
+button.secondary,
+a.button.secondary {
   background: var(--color-surface-hover);
   color: var(--color-text);
   border: 1px solid var(--color-border);
@@ -1406,4 +1408,13 @@ th {
   .manager-kpis { justify-content: flex-start; }
   .manager-report-controls { grid-template-columns: 1fr; }
   .work-hero-actions > *, .work-footer-actions > * { flex: 1 1 140px; }
+}
+
+@media print {
+  body { background: #fff !important; color: #000 !important; }
+  .mfa-backup-document { color: #000 !important; }
+  .mfa-backup-document dl,
+  .mfa-backup-code { border-color: #555 !important; background: #fff !important; color: #000 !important; }
+  .mfa-backup-warning { border-color: #555 !important; background: #fff !important; color: #000 !important; }
+  .mfa-backup-actions { display: none !important; }
 }
